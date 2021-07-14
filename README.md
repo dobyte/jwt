@@ -18,7 +18,7 @@ package main
 import (
     "fmt"
     "log"
-    "github.com/dobyte/gf-jwt"
+    "github.com/dobyte/jwt"
 )
 
 func main() {
