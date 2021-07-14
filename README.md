@@ -7,7 +7,7 @@ GoFrame HTTP JWT Plugin
 Download and install
 
 ```shell
-go get github.com/dobyte/gf-jwt
+go get github.com/dobyte/jwt
 ```
 
 Demo

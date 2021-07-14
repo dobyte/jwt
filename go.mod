@@ -1,4 +1,4 @@
-module github.com/dobyte/gf-jwt
+module github.com/dobyte/jwt
 
 go 1.15
 
