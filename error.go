@@ -53,8 +53,14 @@ var (
 
 	// ErrNoPublicKeyFile indicates that the given public key is unreadable
 	ErrNoPublicKeyFile = errors.New("public key file unreadable")
+	
+	// indicates signing algorithm is invalid, needs to be HS256, HS384, HS512, RS256, RS384 or RS512
+	errInvalidSigningAlgorithm = errors.New("invalid signing algorithm")
+	
+	// indicates that the given secret key is invalid
+	errInvalidSecretKey = errors.New("invalid secret key")
 
-	// ErrInvalidPrivateKey indicates that the given private key is invalid
+	// indicates that the given private key is invalid
 	errInvalidPrivateKey = errors.New("invalid private key")
 
 	// indicates the the given public key is invalid
