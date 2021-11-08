@@ -5,21 +5,19 @@ import (
 	"crypto/rsa"
 	"io/ioutil"
 	"net/http"
+	"os"
 	"strings"
 	"time"
+	"unsafe"
 	
 	"github.com/dgrijalva/jwt-go"
 )
 
+type (
+	Algorithm string
+)
+
 type JWT interface {
-	// SetOptions Set options for jwt.
-	SetOptions(opt *Options)
-	// SetRealm Set realm for jwt.
-	SetRealm(realm string)
-	// SetTokenLookup Set the token search location.
-	SetTokenLookup(tokenLookup string)
-	// SetAlgorithm Set encryption algorithm
-	SetAlgorithm(algorithm string)
 	// SetExpireTime Set expiration time.
 	SetExpireTime(expireTime int64)
 	// SetRefreshTime Set refresh time.
@@ -75,6 +73,7 @@ type defaultJwt struct {
 	publicKey   *rsa.PublicKey
 	privateKey  *rsa.PrivateKey
 	secretKey   []byte
+	err         error
 }
 
 type Token struct {
@@ -98,79 +97,38 @@ const (
 )
 
 const (
-	tokenLookupHeader = "header"
-	tokenLookupQuery  = "query"
-	tokenLookupCookie = "cookie"
-	tokenLookupForm   = "form"
-	tokenHeaderName   = "Bearer"
+	tokenLookupHeader      = "header"
+	tokenLookupQuery       = "query"
+	tokenLookupCookie      = "cookie"
+	tokenLookupForm        = "form"
+	tokenLookupFieldHeader = "Authorization"
+	tokenHeaderName        = "Bearer"
+	
+	HS256 = "HS256"
+	HS512 = "HS512"
+	RS256 = "RS256"
+	RS384 = "RS384"
+	RS512 = "RS512"
 )
 
-func NewJwt(opt *Options) JWT {
-	j := &defaultJwt{}
-	j.SetOptions(opt)
+func NewJwt(opt *Options) (JWT, error) {
+	j := new(defaultJwt)
+	j.realm
+	j.setAlgorithm(opt.Algorithm)
+	j.setTokenLookup(opt.TokenLookup)
+	j.SetExpireTime(opt.ExpireTime)
+	j.SetRefreshTime(opt.RefreshTime)
+	j.setSecretKey(opt.Secret)
+	j.setTokenCtxKey(opt.TokenCtxKey)
+	
+	if j.isRsaAlgorithm() {
+	
+	}
+	
+	j.setPublicKey(opt.PublicKey)
+	j.setPrivateKey(opt.PrivateKey)
+	
 	return j
-}
-
-// SetOptions Set options for jwt.
-func (j *defaultJwt) SetOptions(opt *Options) {
-	if opt != nil {
-		j.SetRealm(opt.Realm)
-		j.SetAlgorithm(opt.Algorithm)
-		j.SetTokenLookup(opt.TokenLookup)
-		j.SetExpireTime(opt.ExpireTime)
-		j.SetRefreshTime(opt.RefreshTime)
-		j.SetSecret(opt.Secret)
-		j.SetTokenCtxKey(opt.TokenCtxKey)
-		
-		if opt.PublicKey != "" {
-			_ = j.SetPublicKey(opt.PublicKey)
-		}
-		
-		if opt.PrivateKey != "" {
-			_ = j.SetPrivateKey(opt.PrivateKey)
-		}
-		
-		if opt.PublicKeyFile != "" {
-			_ = j.ReadPublicKey(opt.PublicKeyFile)
-		}
-		
-		if opt.PrivateKeyFile != "" {
-			_ = j.ReadPrivateKey(opt.PrivateKeyFile)
-		}
-	}
-}
-
-// SetRealm Set realm for jwt.
-func (j *defaultJwt) SetRealm(realm string) {
-	j.realm = realm
-}
-
-// SetTokenLookup Set the token search location.
-func (j *defaultJwt) SetTokenLookup(tokenLookup string) {
-	j.tokenLookup = make([][2]string, 0)
-	
-	if tokenLookup == "" {
-		tokenLookup = "header:Authorization"
-	}
-	
-	for _, method := range strings.Split(tokenLookup, ",") {
-		parts := strings.Split(strings.TrimSpace(method), ":")
-		k := strings.TrimSpace(parts[0])
-		v := strings.TrimSpace(parts[1])
-		switch k {
-		case tokenLookupHeader, tokenLookupQuery, tokenLookupCookie, tokenLookupForm:
-			j.tokenLookup = append(j.tokenLookup, [2]string{k, v})
-		}
-	}
-}
-
-// SetAlgorithm Set encryption algorithm
-func (j *defaultJwt) SetAlgorithm(algorithm string) {
-	if algorithm != "" {
-		j.algorithm = algorithm
-	} else {
-		j.algorithm = "HS256"
-	}
 }
 
 // SetExpireTime Set expiration time.
@@ -191,64 +149,11 @@ func (j *defaultJwt) SetRefreshTime(refreshTime int64) {
 	}
 }
 
-// SetTokenCtxKey Set the key of the token for context transfer.
-func (j *defaultJwt) SetTokenCtxKey(tokenCtxKey string) {
-	j.tokenCtxKey = tokenCtxKey
-}
-
-// SetSecret Set secret key.
-func (j *defaultJwt) SetSecret(secret string) {
-	j.secretKey = []byte(secret)
-}
-
-// SetPublicKey Set public key.
-func (j *defaultJwt) SetPublicKey(publicKey string) error {
-	if key, err := jwt.ParseRSAPublicKeyFromPEM([]byte(publicKey)); err != nil {
-		return ErrInvalidPublicKey
-	} else {
-		j.publicKey = key
-		
-		return nil
-	}
-}
-
-// SetPrivateKey Set private key.
-func (j *defaultJwt) SetPrivateKey(privateKey string) error {
-	if key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(privateKey)); err != nil {
-		return ErrInvalidPrivateKey
-	} else {
-		j.privateKey = key
-		
-		return nil
-	}
-}
-
-// ReadPublicKey Read public key from file.
-func (j *defaultJwt) ReadPublicKey(file string) error {
-	if data, err := ioutil.ReadFile(file); err != nil {
-		return ErrNoPublicKeyFile
-	} else {
-		return j.SetPublicKey(string(data))
-	}
-}
-
-// ReadPrivateKey Read private key from file
-func (j *defaultJwt) ReadPrivateKey(file string) error {
-	if data, err := ioutil.ReadFile(file); err != nil {
-		return ErrNoPrivateKeyFile
-	} else {
-		return j.SetPrivateKey(string(data))
-	}
-}
-
 // Middleware A jwt auth middleware.
 func (j *defaultJwt) Middleware(r *http.Request) (*http.Request, error) {
-	tokenStr, err := j.LookupToken(r)
-	if err != nil {
-		return nil, err
-	}
+	token := j.LookupToken(r)
 	
-	claims, err := j.ParseToken(tokenStr)
+	claims, err := j.ParseToken(token)
 	if err != nil {
 		return nil, err
 	}
@@ -264,7 +169,7 @@ func (j *defaultJwt) Middleware(r *http.Request) (*http.Request, error) {
 	}
 	
 	if j.tokenCtxKey != "" {
-		ctx = context.WithValue(ctx, j.tokenCtxKey, tokenStr)
+		ctx = context.WithValue(ctx, j.tokenCtxKey, token)
 	}
 	
 	return r.WithContext(ctx), nil
@@ -278,19 +183,22 @@ func (j *defaultJwt) GenerateToken(payload map[string]interface{}) (*Token, erro
 	claims[jwtExpire] = expire.Unix()
 	claims[jwtExclusiveCode] = time.Now().UnixNano()
 	for k, v := range payload {
-		if k != jwtIssueAt && k != jwtExpire && k != jwtExclusiveCode {
+		switch k {
+		case jwtIssueAt, jwtExpire, jwtExclusiveCode:
+			// ignore the standard claims
+		default:
 			claims[k] = v
 		}
 	}
 	
-	tokenStr, err := j.signedToken(claims)
+	token, err := j.signedToken(claims)
 	if err != nil {
 		return nil, err
 	}
 	
 	return &Token{
 		Type:      tokenHeaderName,
-		Token:     tokenStr,
+		Token:     token,
 		ExpireAt:  expire.Format(time.RFC3339),
 		InvalidAt: time.Unix(claims[jwtIssueAt].(int64), 0).Add(j.refreshTime).Format(time.RFC3339),
 	}, nil
@@ -367,97 +275,60 @@ func (j *defaultJwt) GetCtxValue(r *http.Request, key string) interface{} {
 }
 
 // LookupToken Look up token from request.
-func (j *defaultJwt) LookupToken(r *http.Request) (string, error) {
-	var (
-		err      error
-		tokenStr string
-	)
-	
+func (j *defaultJwt) LookupToken(r *http.Request) (token string) {
 	for _, item := range j.tokenLookup {
-		if len(tokenStr) > 0 {
+		if len(token) > 0 {
 			break
 		}
-		
 		switch item[0] {
 		case tokenLookupHeader:
-			tokenStr, err = j.lookupTokenFromHeader(r, item[1])
+			token = j.lookupTokenFromHeader(r, item[1])
 		case tokenLookupQuery:
-			tokenStr, err = j.lookupTokenFromQuery(r, item[1])
+			token = j.lookupTokenFromQuery(r, item[1])
 		case tokenLookupCookie:
-			tokenStr, err = j.lookupTokenFromCookie(r, item[1])
+			token = j.lookupTokenFromCookie(r, item[1])
 		case tokenLookupForm:
-			tokenStr, err = j.lookupTokenFromForm(r, item[1])
+			token = j.lookupTokenFromForm(r, item[1])
 		}
 	}
-	if err != nil {
-		return "", err
-	}
 	
-	return tokenStr, err
+	return
 }
 
 // lookupTokenFromHeader Get token from headers of request.
-func (j *defaultJwt) lookupTokenFromHeader(r *http.Request, key string) (string, error) {
-	authHeader := r.Header.Get(key)
-	
-	if authHeader == "" {
-		return "", ErrEmptyAuthHeader
+func (j *defaultJwt) lookupTokenFromHeader(r *http.Request, key string) string {
+	parts := strings.SplitN(r.Header.Get(key), " ", 2)
+	if len(parts) != 2 || parts[0] != tokenHeaderName {
+		return ""
 	}
 	
-	parts := strings.SplitN(authHeader, " ", 2)
-	if !(len(parts) == 2 && parts[0] == tokenHeaderName) {
-		return "", ErrInvalidAuthHeader
-	}
-	
-	return parts[1], nil
+	return parts[1]
 }
 
 // lookupTokenFromQuery Get token from queries of request.
-func (j *defaultJwt) lookupTokenFromQuery(r *http.Request, key string) (string, error) {
-	tokenStr := r.URL.Query().Get(key)
-	
-	if tokenStr == "" {
-		return "", ErrEmptyQueryToken
-	}
-	
-	return tokenStr, nil
+func (j *defaultJwt) lookupTokenFromQuery(r *http.Request, key string) string {
+	return r.URL.Query().Get(key)
 }
 
 // lookupTokenFromCookie Get token from cookies of request.
-func (j *defaultJwt) lookupTokenFromCookie(r *http.Request, key string) (string, error) {
-	cookie, err := r.Cookie(key)
-	if err != nil {
-		return "", ErrEmptyCookieToken
-	}
-	
-	tokenStr := cookie.String()
-	
-	if tokenStr == "" {
-		return "", ErrEmptyCookieToken
-	}
-	
-	return tokenStr, nil
+func (j *defaultJwt) lookupTokenFromCookie(r *http.Request, key string) string {
+	cookie, _ := r.Cookie(key)
+	return cookie.String()
 }
 
 // lookupTokenFromForm Get token from form of request.
-func (j *defaultJwt) lookupTokenFromForm(r *http.Request, key string) (string, error) {
-	tokenStr := r.Form.Get(key)
-	
-	if tokenStr == "" {
-		return "", ErrEmptyParamToken
-	}
-	
-	return tokenStr, nil
+func (j *defaultJwt) lookupTokenFromForm(r *http.Request, key string) string {
+	return r.Form.Get(key)
 }
 
-// parsedToken Parse the token
+// Parse the token
 func (j *defaultJwt) parsedToken(tokenStr string) (*jwt.Token, error) {
 	return jwt.Parse(tokenStr, func(t *jwt.Token) (interface{}, error) {
 		if jwt.GetSigningMethod(j.algorithm) != t.Method {
 			return nil, ErrInvalidSigningAlgorithm
 		}
 		
-		if j.isRsaAlgo() {
+		if j.isRsaAlgorithm() {
 			return j.publicKey, nil
 		} else {
 			return j.secretKey, nil
@@ -475,7 +346,7 @@ func (j *defaultJwt) signedToken(claims jwt.MapClaims) (string, error) {
 	
 	token.Claims = claims
 	
-	if j.isRsaAlgo() {
+	if j.isRsaAlgorithm() {
 		tokenStr, err = token.SignedString(j.privateKey)
 	} else {
 		tokenStr, err = token.SignedString(j.secretKey)
@@ -488,11 +359,131 @@ func (j *defaultJwt) signedToken(claims jwt.MapClaims) (string, error) {
 	return tokenStr, nil
 }
 
-// isRsaAlgo Check which signature algorithm is used
-func (j *defaultJwt) isRsaAlgo() bool {
+// Check which signature algorithm is used
+func (j *defaultJwt) isRsaAlgorithm() bool {
 	switch j.algorithm {
-	case "RS256", "RS512", "RS384":
+	case RS256, RS384, RS512:
 		return true
 	}
 	return false
+}
+
+func ()() {
+
+}
+
+// Set encryption algorithm
+func (j *defaultJwt) setAlgorithm(algorithm string) {
+	switch algorithm {
+	case RS256, RS384, RS512, HS256, HS512:
+		j.algorithm = algorithm
+	default:
+		j.algorithm = HS256
+	}
+}
+
+// SetTokenLookup Set the token search location.
+func (j *defaultJwt) setTokenLookup(tokenLookup string) {
+	j.tokenLookup = make([][2]string, 0)
+	
+	for _, method := range strings.Split(tokenLookup, ",") {
+		parts := strings.Split(strings.TrimSpace(method), ":")
+		k := strings.TrimSpace(parts[0])
+		v := strings.TrimSpace(parts[1])
+		switch k {
+		case tokenLookupHeader, tokenLookupQuery, tokenLookupCookie, tokenLookupForm:
+			j.tokenLookup = append(j.tokenLookup, [2]string{k, v})
+		}
+	}
+	
+	if len(j.tokenLookup) == 0 {
+		j.tokenLookup = append(j.tokenLookup, [2]string{tokenLookupHeader, tokenLookupFieldHeader})
+	}
+}
+
+// Set the key of the token for context transfer.
+func (j *defaultJwt) setTokenCtxKey(tokenCtxKey string) {
+	j.tokenCtxKey = tokenCtxKey
+}
+
+// Set secret key.
+func (j *defaultJwt) setSecretKey(secretKey string) {
+	j.secretKey = stringToBytes(secretKey)
+}
+
+//
+func (j *defaultJwt) setRasKey(publicKey, privateKey string) (err error) {
+	if err = j.setPublicKey(publicKey); err != nil {
+		return
+	}
+	
+	if err = j.setPrivateKey(privateKey); err != nil {
+		return
+	}
+	
+	return
+}
+
+// Set public key.
+// allow the public key file path or the public key.
+func (j *defaultJwt) setPublicKey(publicKey string) (err error) {
+	if publicKey == "" {
+		return errInvalidPublicKey
+	}
+	
+	var key []byte
+	
+	if fileInfo, err := os.Stat(publicKey); err != nil {
+		key = stringToBytes(publicKey)
+	} else {
+		if fileInfo.Size() == 0 {
+			return errInvalidPublicKey
+		}
+		
+		if key, err = ioutil.ReadFile(publicKey); err != nil {
+			return
+		}
+	}
+	
+	if j.publicKey, err = jwt.ParseRSAPublicKeyFromPEM(key); err != nil {
+		return
+	}
+	
+	return
+}
+
+// Set private key.
+// allow the private key file path or the private key.
+func (j *defaultJwt) setPrivateKey(privateKey string) (err error) {
+	if privateKey == "" {
+		return errInvalidPrivateKey
+	}
+	
+	var key []byte
+	
+	if fileInfo, err := os.Stat(privateKey); err != nil {
+		key = stringToBytes(privateKey)
+	} else {
+		if fileInfo.Size() == 0 {
+			return errInvalidPrivateKey
+		}
+		
+		if key, err = ioutil.ReadFile(privateKey); err != nil {
+			return
+		}
+	}
+	
+	if j.privateKey, err = jwt.ParseRSAPrivateKeyFromPEM(key); err != nil {
+		return
+	}
+	
+	return
+}
+
+func stringToBytes(str string) []byte {
+	return *(*[]byte)(unsafe.Pointer(&str))
+}
+
+func bytesToString(bytes []byte) string {
+	return *(*string)(unsafe.Pointer(&bytes))
 }

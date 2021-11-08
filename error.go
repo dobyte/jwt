@@ -1,26 +1,6 @@
 package jwt
 
-const (
-	ErrorMissingSecretKey uint32 = 1 << iota // Token is malformed
-	ErrorExpiredToken
-	ErrorEmptyAuthHeader
-	ErrorMissingExpField
-	ErrorWrongFormatOfExp
-	ErrorInvalidPublicKey
-	ErrorInvalidPrivateKey
-	ErrorNoPublicKeyFile
-	ErrorNoPrivateKeyFile
-	ErrorInvalidSigningAlgorithm
-	ErrorEmptyToken
-	ErrorInvalidAuthHeader
-	ErrorEmptyQueryToken
-	ErrorEmptyCookieToken
-	ErrorEmptyParamToken
-	ErrorFailedTokenCreation
-	ErrorFailedTokenDestroy
-	ErrorInvalidToken
-	ErrorAuthorizeElsewhere
-)
+import "errors"
 
 var (
 	// ErrMissingSecretKey indicates Secret key is required
@@ -54,56 +34,29 @@ var (
 	ErrEmptyToken = NewError("token is empty", ErrorEmptyToken)
 
 	// ErrInvalidAuthHeader indicates auth header is invalid, could for example have the wrong Realm name
-	ErrInvalidAuthHeader = NewError("auth header is invalid", ErrorInvalidAuthHeader)
+	ErrInvalidAuthHeader = errors.New("auth header is invalid", ErrorInvalidAuthHeader)
 
 	// ErrEmptyQueryToken can be thrown if authing with URL Query, the query token variable is empty
-	ErrEmptyQueryToken = NewError("query token is empty", ErrorEmptyQueryToken)
+	ErrEmptyQueryToken = errors.New("query token is empty", ErrorEmptyQueryToken)
 
 	// ErrEmptyCookieToken can be thrown if authing with a cookie, the token cookie is empty
-	ErrEmptyCookieToken = NewError("cookie token is empty", ErrorEmptyCookieToken)
+	ErrEmptyCookieToken = errors.New("cookie token is empty")
 
 	// ErrEmptyParamToken can be thrown if authing with parameter in path, the parameter in path is empty
-	ErrEmptyParamToken = NewError("parameter token is empty", ErrorEmptyParamToken)
+	ErrEmptyParamToken = errors.New("parameter token is empty")
 
 	// ErrInvalidSigningAlgorithm indicates signing algorithm is invalid, needs to be HS256, HS384, HS512, RS256, RS384 or RS512
-	ErrInvalidSigningAlgorithm = NewError("invalid signing algorithm", ErrorInvalidSigningAlgorithm)
+	ErrInvalidSigningAlgorithm = errors.New("invalid signing algorithm")
 
 	// ErrNoPrivateKeyFile indicates that the given private key is unreadable
-	ErrNoPrivateKeyFile = NewError("private key file unreadable", ErrorNoPrivateKeyFile)
+	ErrNoPrivateKeyFile = errors.New("private key file unreadable")
 
 	// ErrNoPublicKeyFile indicates that the given public key is unreadable
-	ErrNoPublicKeyFile = NewError("public key file unreadable", ErrorNoPublicKeyFile)
+	ErrNoPublicKeyFile = errors.New("public key file unreadable")
 
 	// ErrInvalidPrivateKey indicates that the given private key is invalid
-	ErrInvalidPrivateKey = NewError("private key invalid", ErrorInvalidPrivateKey)
+	errInvalidPrivateKey = errors.New("invalid private key")
 
-	// ErrInvalidPublicKey indicates the the given public key is invalid
-	ErrInvalidPublicKey = NewError("public key invalid", ErrorInvalidPublicKey)
+	// indicates the the given public key is invalid
+	errInvalidPublicKey = errors.New("invalid public key")
 )
-
-type Error struct {
-	Inner  error
-	Errors uint32
-	text   string
-}
-
-func NewError(errorText string, errorFlags uint32) *Error {
-	return &Error{
-		text:   errorText,
-		Errors: errorFlags,
-	}
-}
-
-// Validation error is an error type
-func (o *Error) Error() string {
-	if o.Inner != nil {
-		return o.Inner.Error()
-	}
-
-	return o.text
-}
-
-// No errors
-func (o *Error) valid() bool {
-	return o.Errors == 0
-}
