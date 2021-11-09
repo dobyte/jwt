@@ -16,13 +16,12 @@ type Response struct {
     Data    interface{} `json:"data"`
 }
 
-var auth = jwt.NewJwt(&jwt.Options{
-    Realm:       "backend",
-    Algorithm:   "HS256",
-    Secret:      "secret",
-    ExpireTime:  3600,
-    RefreshTime: 7200,
-    TokenLookup: "header:Authorization",
+var auth, err = jwt.NewJwt(&jwt.Options{
+    Issuer:      "backend",
+    Algorithm:   jwt.HS256,
+    SecretKey:   "secret",
+    ExpiredTime: 3600,
+    TokenSeeks:  "header:Authorization",
 })
 
 func responseFail(r *ghttp.Request, status int, message string) {

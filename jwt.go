@@ -16,34 +16,39 @@ import (
 type (
     Algorithm string
     
+    Payload map[string]interface{}
+    
     Cache interface {
     }
     
     JWT interface {
-        // Middleware A jwt auth middleware.
+        // Middleware Implemented basic JWT permission authentication.
         Middleware(r *http.Request) (*http.Request, error)
-        // GenerateToken Generate a token.
+        // GenerateToken Generates and returns a new token object.
         GenerateToken(payload map[string]interface{}) (*Token, error)
-        // RefreshToken Refresh a token.
-        RefreshToken(tokenStr string) (*Token, error)
-        // LookupToken Look up token from request.
-        LookupToken(r *http.Request) (string, error)
-        // ParseToken Parse token into map.
-        ParseToken(tokenStr string) (jwt.MapClaims, error)
+        // RefreshToken generates and returns a new token object depend on old token.
+        RefreshToken(token string) (*Token, error)
+        // ParseToken Parses and returns a claims map from the token.
+        // Ignore token expired error, If necessary, you need to judge the expiration by yourself.
+        ParseToken(token string) (jwts.MapClaims, error)
+        // SeekToken Seeks and returns token from request.
+        // 1.from header    Authorization: Bearer ${token}
+        // 2.from query     ${url}?${key}=${token}
+        // 3.from cookie    Cookie: ${key}=${token}
+        // 4.from form      ${key}=${token}
+        SeekToken(r *http.Request) (token string)
         // GetCtxValue Get value from request's context.
         GetCtxValue(r *http.Request, key string) interface{}
     }
 )
 
 type Options struct {
-    //
-    Realm          string
-    Algorithm      string
-    SecretKey      string
-    RefreshTime    int64
-    ExpirationTime int64
-    TokenLookup    string
-    TokenCtxKey    string
+    Issuer      string
+    Algorithm   string
+    SecretKey   string
+    RefreshTime int64
+    ExpiredTime int64
+    TokenSeeks  string
     
     // public key file or public key.
     PublicKey string
@@ -53,30 +58,30 @@ type Options struct {
 }
 
 type jwt struct {
-    realm          string
-    algorithm      string
-    expirationTime time.Duration
-    refreshTime    time.Duration
-    tokenCtxKey    string
-    tokenLookup    [][2]string
-    publicKey      *rsa.PublicKey
-    privateKey     *rsa.PrivateKey
-    secretKey      []byte
+    issuer      string
+    algorithm   string
+    expiredMode int
+    expiredTime time.Duration
+    refreshTime time.Duration
+    tokenCtxKey string
+    tokenSeeks  [][2]string
+    publicKey   *rsa.PublicKey
+    privateKey  *rsa.PrivateKey
+    secretKey   []byte
 }
 
 type Token struct {
-    Type      string `json:"type"`
     Token     string `json:"token"`
-    ExpireAt  string `json:"expire_at"`
-    InvalidAt string `json:"invalid_at"`
+    ExpiredAt string `json:"expired_at"`
+    RefreshAt string `json:"refresh_at"`
 }
 
 const (
-    jwtRealm         = "rea"
     jwtAudience      = "aud"
-    jwtExpire        = "exp"
     jwtId            = "jti"
     jwtIssueAt       = "iat"
+    jwtExpiredAt     = "exp"
+    jwtRefreshAt     = "ref"
     jwtIssuer        = "iss"
     jwtNotBefore     = "nbf"
     jwtSubject       = "sub"
@@ -85,34 +90,34 @@ const (
 )
 
 const (
-    tokenLookupHeader      = "header"
-    tokenLookupQuery       = "query"
-    tokenLookupCookie      = "cookie"
-    tokenLookupForm        = "form"
-    tokenLookupFieldHeader = "Authorization"
-    tokenHeaderName        = "Bearer"
+    tokenSeekFromHeader  = "header"
+    tokenSeekFromQuery   = "query"
+    tokenSeekFromCookie  = "cookie"
+    tokenSeekFromForm    = "form"
+    tokenSeekFieldHeader = "Authorization"
+    authorizationBearer  = "Bearer"
     
-    HS256                 = "HS256"
-    HS512                 = "HS512"
-    HS384                 = "HS384"
-    RS256                 = "RS256"
-    RS384                 = "RS384"
-    RS512                 = "RS512"
-    ES256                 = "ES256"
-    ES384                 = "ES384"
-    ES512                 = "ES512"
+    HS256 = "HS256"
+    HS512 = "HS512"
+    HS384 = "HS384"
+    RS256 = "RS256"
+    RS384 = "RS384"
+    RS512 = "RS512"
+    ES256 = "ES256"
+    ES384 = "ES384"
+    ES512 = "ES512"
+    
     defaultAlgorithm      = HS256
-    defaultTokenCtxKey    = "token"
     defaultExpirationTime = time.Hour
-    defaultRefreshTime    = 5 * time.Hour
+    defaultPayloadCtxKey  = "jwt_payload"
+    defaultTokenCtxKey    = "jwt_token"
 )
 
 func NewJwt(opt *Options) (JWT, error) {
     j := new(jwt)
-    j.setRealm(opt.Realm)
-    j.setTokenCtxKey(opt.TokenCtxKey)
-    j.setTokenLookup(opt.TokenLookup)
-    j.setExpirationTime(opt.ExpirationTime)
+    j.setIssuer(opt.Issuer)
+    j.setTokenSeeks(opt.TokenSeeks)
+    j.setExpiredTime(opt.ExpiredTime)
     j.setRefreshTime(opt.RefreshTime)
     
     var err error
@@ -138,64 +143,73 @@ func NewJwt(opt *Options) (JWT, error) {
     return j, nil
 }
 
-// Middleware A jwt auth middleware.
+// Middleware Implemented basic JWT permission authentication.
 func (j *jwt) Middleware(r *http.Request) (*http.Request, error) {
-    token := j.LookupToken(r)
+    token := j.SeekToken(r)
+    if token == "" {
+        return nil, errMissingToken
+    }
     
     claims, err := j.ParseToken(token)
     if err != nil {
         return nil, err
     }
     
-    ctx := r.Context()
+    payload := make(Payload)
     for k, v := range claims {
         switch k {
-        case jwtAudience, jwtExpire, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
+        case jwtAudience, jwtExpiredAt, jwtRefreshAt, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
             // ignore the standard claims
         default:
-            ctx = context.WithValue(ctx, k, v)
+            payload[k] = v
         }
     }
     
-    if j.tokenCtxKey != "" {
-        ctx = context.WithValue(ctx, j.tokenCtxKey, token)
-    }
+    ctx := r.Context()
+    
+    ctx = context.WithValue(ctx, defaultPayloadCtxKey, payload)
+    
+    ctx = context.WithValue(ctx, defaultTokenCtxKey, token)
     
     return r.WithContext(ctx), nil
 }
 
-// GenerateToken generates and returns a new token object.
+// GenerateToken Generates and returns a new token object.
 func (j *jwt) GenerateToken(payload map[string]interface{}) (*Token, error) {
-    now := time.Now()
-    expire := now.Add(j.expirationTime)
-    claims := make(jwts.MapClaims)
+    var (
+        claims    = make(jwts.MapClaims)
+        now       = time.Now()
+        expiredAt = now.Add(j.expiredTime)
+        refreshAt = now.Add(j.refreshTime)
+    )
+    
+    claims[jwtIssuer] = j.issuer
     claims[jwtIssueAt] = now.Unix()
-    claims[jwtExpire] = expire.Unix()
+    claims[jwtExpiredAt] = expiredAt.Unix()
+    claims[jwtRefreshAt] = refreshAt.Unix()
     claims[jwtExclusiveCode] = now.UnixNano()
     for k, v := range payload {
         switch k {
-        case jwtIssueAt, jwtExpire, jwtExclusiveCode:
+        case jwtIssuer, jwtIssueAt, jwtExpiredAt, jwtRefreshAt, jwtExclusiveCode:
             // ignore the standard claims
         default:
             claims[k] = v
         }
     }
     
-    token, err := j.signingToken(claims)
+    token, err := j.signToken(claims)
     if err != nil {
         return nil, err
     }
     
     return &Token{
-        Type:      tokenHeaderName,
         Token:     token,
-        ExpireAt:  expire.Format(time.RFC3339),
-        InvalidAt: time.Unix(claims[jwtIssueAt].(int64), 0).Add(j.refreshTime).Format(time.RFC3339),
+        ExpiredAt: expiredAt.Format(time.RFC3339),
+        RefreshAt: refreshAt.Format(time.RFC3339),
     }, nil
 }
 
 // RefreshToken generates and returns a new token object depend on old token.
-//
 func (j *jwt) RefreshToken(token string) (*Token, error) {
     var (
         err       error
@@ -204,8 +218,16 @@ func (j *jwt) RefreshToken(token string) (*Token, error) {
     )
     
     claims, err = j.ParseToken(token)
-    if err != nil && err != ErrExpiredToken {
+    if err != nil {
         return nil, err
+    }
+    
+    now := time.Now()
+    
+    if ref, ok := claims[jwtRefreshAt]; !ok {
+        return nil, errInvalidToken
+    } else if int64(ref.(float64)) < now.Unix() {
+        return nil, errExpiredToken
     }
     
     newClaims = make(jwts.MapClaims)
@@ -213,51 +235,53 @@ func (j *jwt) RefreshToken(token string) (*Token, error) {
         newClaims[k] = v
     }
     
-    expire := time.Now().Add(j.expireTime)
+    var (
+        expiredAt = now.Add(j.expiredTime)
+        refreshAt = now.Add(j.refreshTime)
+    )
     
-    newClaims[jwtExpire] = expire.Unix()
+    newClaims[jwtExpiredAt] = expiredAt.Unix()
+    newClaims[jwtRefreshAt] = refreshAt.Unix()
     
-    tokenStr, err = j.signedToken(newClaims)
+    token, err = j.signToken(newClaims)
     if err != nil {
         return nil, err
     }
     
     return &Token{
-        Type:      tokenHeaderName,
-        Token:     tokenStr,
-        ExpireAt:  expire.Format(time.RFC3339),
-        InvalidAt: time.Unix(int64(newClaims[jwtIssueAt].(float64)), 0).Add(j.refreshTime).Format(time.RFC3339),
+        Token:     token,
+        ExpiredAt: expiredAt.Format(time.RFC3339),
+        RefreshAt: refreshAt.Format(time.RFC3339),
     }, nil
 }
 
-// ParseToken Parse token into map.
-func (j *jwt) ParseToken(tokenStr string) (jwts.MapClaims, error) {
-    token, err := j.parsedToken(tokenStr)
+// ParseToken Parses and returns a claims map from the token.
+// Ignore token expired error, If necessary, you need to judge the expiration by yourself.
+func (j *jwt) ParseToken(token string) (jwts.MapClaims, error) {
+    jt, err := j.parseToken(token)
     if err != nil {
-        if validationErr, ok := err.(*jwts.ValidationError); !ok || validationErr.Errors != jwts.ValidationErrorExpired {
-            return nil, ErrInvalidToken
+        switch e := err.(type) {
+        case *jwts.ValidationError:
+            switch e.Errors {
+            case jwts.ValidationErrorExpired:
+                // ignore token expired error
+            default:
+                return nil, errInvalidToken
+            }
+        default:
+            return nil, errInvalidToken
         }
     }
     
-    if token == nil {
-        return nil, ErrEmptyToken
+    if jt == nil || !jt.Valid {
+        return nil, errInvalidToken
     }
     
-    claims := token.Claims.(jwts.MapClaims)
-    
-    if iat, ok := claims[jwtIssueAt]; !ok {
-        return nil, ErrInvalidToken
-    } else if int64(iat.(float64)) < time.Now().Add(-j.refreshTime).Unix() {
-        return nil, ErrInvalidToken
-    }
-    
-    if exp, ok := claims[jwtExpire]; !ok {
-        return nil, ErrInvalidToken
-    } else if int64(exp.(float64)) < time.Now().Unix() {
-        return claims, ErrExpiredToken
-    }
-    
-    return claims, nil
+    return jt.Claims.(jwts.MapClaims), nil
+}
+
+func (j *jwt) GetPayload(r *http.Request) interface{} {
+    return r.Context().Value(defaultPayloadCtxKey)
 }
 
 // GetCtxValue Get value from request's context.
@@ -265,70 +289,74 @@ func (j *jwt) GetCtxValue(r *http.Request, key string) interface{} {
     return r.Context().Value(key)
 }
 
-// LookupToken Look up token from request.
-func (j *jwt) LookupToken(r *http.Request) (token string) {
-    for _, item := range j.tokenLookup {
+// SeekToken Seeks and returns token from request.
+// 1.from header    Authorization: Bearer ${token}
+// 2.from query     ${url}?${key}=${token}
+// 3.from cookie    Cookie: ${key}=${token}
+// 4.from form      ${key}=${token}
+func (j *jwt) SeekToken(r *http.Request) (token string) {
+    for _, item := range j.tokenSeeks {
         if len(token) > 0 {
             break
         }
         switch item[0] {
-        case tokenLookupHeader:
-            token = j.lookupTokenFromHeader(r, item[1])
-        case tokenLookupQuery:
-            token = j.lookupTokenFromQuery(r, item[1])
-        case tokenLookupCookie:
-            token = j.lookupTokenFromCookie(r, item[1])
-        case tokenLookupForm:
-            token = j.lookupTokenFromForm(r, item[1])
+        case tokenSeekFromHeader:
+            token = j.seekTokenFromHeader(r, item[1])
+        case tokenSeekFromQuery:
+            token = j.seekTokenFromQuery(r, item[1])
+        case tokenSeekFromCookie:
+            token = j.seekTokenFromCookie(r, item[1])
+        case tokenSeekFromForm:
+            token = j.seekTokenFromForm(r, item[1])
         }
     }
     
     return
 }
 
-// lookupTokenFromHeader Get token from headers of request.
-func (j *jwt) lookupTokenFromHeader(r *http.Request, key string) string {
+// Seeks and returns JWT token from the headers of request.
+func (j *jwt) seekTokenFromHeader(r *http.Request, key string) string {
     parts := strings.SplitN(r.Header.Get(key), " ", 2)
-    if len(parts) != 2 || parts[0] != tokenHeaderName {
+    if len(parts) != 2 || parts[0] != authorizationBearer {
         return ""
     }
     
     return parts[1]
 }
 
-// lookupTokenFromQuery Get token from queries of request.
-func (j *jwt) lookupTokenFromQuery(r *http.Request, key string) string {
+// Seeks and returns JWT token from the query params of request.
+func (j *jwt) seekTokenFromQuery(r *http.Request, key string) string {
     return r.URL.Query().Get(key)
 }
 
-// lookupTokenFromCookie Get token from cookies of request.
-func (j *jwt) lookupTokenFromCookie(r *http.Request, key string) string {
+// Seeks and returns JWT token from the cookies of request.
+func (j *jwt) seekTokenFromCookie(r *http.Request, key string) string {
     cookie, _ := r.Cookie(key)
     return cookie.String()
 }
 
-// lookupTokenFromForm Get token from form of request.
-func (j *jwt) lookupTokenFromForm(r *http.Request, key string) string {
+// Seeks and returns JWT token from the post forms of request.
+func (j *jwt) seekTokenFromForm(r *http.Request, key string) string {
     return r.Form.Get(key)
 }
 
 // Parse the token
-func (j *jwt) parsingToken(tokenStr string) (*jwts.Token, error) {
-    return jwts.Parse(tokenStr, func(t *jwts.Token) (interface{}, error) {
+func (j *jwt) parseToken(token string) (*jwts.Token, error) {
+    return jwts.Parse(token, func(t *jwts.Token) (interface{}, error) {
         if jwts.GetSigningMethod(j.algorithm) != t.Method {
-            return nil, ErrInvalidSigningAlgorithm
+            return nil, errSigningMethodNotMatch
         }
         
-        if j.isRsaAlgorithm() {
-            return j.publicKey, nil
-        } else {
+        if j.isHMAC() {
             return j.secretKey, nil
+        } else {
+            return j.publicKey, nil
         }
     })
 }
 
-// signings the claims and returns a token.
-func (j *jwt) signingToken(claims jwts.MapClaims) (token string, err error) {
+// Signings and returns a token depend on the claims.
+func (j *jwt) signToken(claims jwts.MapClaims) (token string, err error) {
     jt := jwts.New(jwts.GetSigningMethod(j.algorithm))
     jt.Claims = claims
     
@@ -344,36 +372,10 @@ func (j *jwt) signingToken(claims jwts.MapClaims) (token string, err error) {
     return
 }
 
+// Check whether the signature method is HMAC.
 func (j *jwt) isHMAC() bool {
     switch j.algorithm {
     case HS256, HS384, HS512:
-        return true
-    }
-    return false
-}
-
-//
-func (j *jwt) isRSA() bool {
-    switch j.algorithm {
-    case RS256, RS384, RS512:
-        return true
-    }
-    return false
-}
-
-//
-func (j *jwt) isECDSA() bool {
-    switch j.algorithm {
-    case RS256, RS384, RS512:
-        return true
-    }
-    return false
-}
-
-// Check which signature algorithm is used
-func (j *jwt) isRsaAlgorithm() bool {
-    switch j.algorithm {
-    case RS256, RS384, RS512:
         return true
     }
     return false
@@ -388,52 +390,44 @@ func (j *jwt) setAlgorithm(algorithm string) error {
     case "":
         j.algorithm = defaultAlgorithm
     default:
-        return errInvalidSigningAlgorithm
+        return errInvalidSigningMethod
     }
     
     return nil
 }
 
 // SetTokenLookup Set the token search location.
-func (j *jwt) setTokenLookup(tokenLookup string) {
-    j.tokenLookup = make([][2]string, 0)
+func (j *jwt) setTokenSeeks(tokenLookup string) {
+    j.tokenSeeks = make([][2]string, 0)
     
     for _, method := range strings.Split(tokenLookup, ",") {
         parts := strings.Split(strings.TrimSpace(method), ":")
         k := strings.TrimSpace(parts[0])
         v := strings.TrimSpace(parts[1])
         switch k {
-        case tokenLookupHeader, tokenLookupQuery, tokenLookupCookie, tokenLookupForm:
-            j.tokenLookup = append(j.tokenLookup, [2]string{k, v})
+        case tokenSeekFromHeader, tokenSeekFromQuery, tokenSeekFromCookie, tokenSeekFromForm:
+            j.tokenSeeks = append(j.tokenSeeks, [2]string{k, v})
         }
     }
     
-    if len(j.tokenLookup) == 0 {
-        j.tokenLookup = append(j.tokenLookup, [2]string{tokenLookupHeader, tokenLookupFieldHeader})
+    if len(j.tokenSeeks) == 0 {
+        j.tokenSeeks = append(j.tokenSeeks, [2]string{tokenSeekFromHeader, tokenSeekFieldHeader})
     }
 }
 
-func (j *jwt) setRealm(realm string) {
-    j.realm = realm
-}
-
-// Set the key of the token for context transfer.
-func (j *jwt) setTokenCtxKey(tokenCtxKey string) {
-    if tokenCtxKey != "" {
-        j.tokenCtxKey = tokenCtxKey
-    } else {
-        j.tokenCtxKey = defaultTokenCtxKey
-    }
+// Set the issuer of the token.
+func (j *jwt) setIssuer(issuer string) {
+    j.issuer = issuer
 }
 
 // Set expiration time.
 // If only set the expiration time,
 // The refresh time will automatically be set to half of the expiration time.
-func (j *jwt) setExpirationTime(expirationTime int64) {
+func (j *jwt) setExpiredTime(expirationTime int64) {
     if expirationTime > 0 {
-        j.expirationTime = time.Duration(expirationTime) * time.Second
+        j.expiredTime = time.Duration(expirationTime) * time.Second
     } else {
-        j.expirationTime = defaultExpirationTime
+        j.expiredTime = defaultExpirationTime
     }
 }
 
@@ -444,7 +438,7 @@ func (j *jwt) setRefreshTime(refreshTime int64) {
     if refreshTime > 0 {
         j.refreshTime = time.Duration(refreshTime) * time.Second
     } else {
-        j.refreshTime = j.expirationTime / 2
+        j.refreshTime = j.expiredTime / 2
     }
 }
 
