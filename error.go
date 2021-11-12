@@ -12,6 +12,10 @@ var (
 	// indicates auth header is invalid, could for example have the wrong issuer
 	errInvalidToken = errors.New("token is invalid")
 
+	errIdentityMissing = errors.New("identity is missing")
+
+	errAuthElsewhere = errors.New("auth elsewhere")
+
 	//
 	errSigningMethodNotMatch = errors.New("signing method does not match")
 

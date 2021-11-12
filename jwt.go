@@ -7,6 +7,7 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 	"unsafe"
@@ -134,38 +135,45 @@ const (
 
 	defaultSignMethod     = HS256
 	defaultExpirationTime = time.Hour
-	defaultPayloadCtxKey  = "jwt_payload"
-	defaultTokenCtxKey    = "jwt_token"
+	defaultPayloadCtxKey  = "JWT_PAYLOAD"
+	defaultTokenCtxKey    = "JWT_TOKEN"
 )
 
 func NewJwt(opt *Options) (JWT, error) {
 	j := new(jwt)
+
+	if err := j.init(opt); err != nil {
+		return nil, err
+	}
+
+	return j, nil
+}
+
+func (j *jwt) init(opt *Options) (err error) {
 	j.setIssuer(opt.Issuer)
 	j.setLocations(opt.Locations)
 	j.setExpiredTime(opt.ExpiredTime)
 	j.setRefreshTime(opt.RefreshTime)
 
-	var err error
-
 	if err = j.setSigningMethod(opt.SignMethod); err != nil {
-		return nil, err
+		return
 	}
 
 	if j.isHMAC() {
 		if err = j.setSecretKey(opt.SecretKey); err != nil {
-			return nil, err
+			return
 		}
 	} else {
 		if err = j.setPublicKey(opt.PublicKey); err != nil {
-			return nil, err
+			return
 		}
 
 		if err = j.setPrivateKey(opt.PrivateKey); err != nil {
-			return nil, err
+			return
 		}
 	}
 
-	return j, nil
+	return
 }
 
 // Middleware Implemented basic JWT permission authentication.
@@ -183,37 +191,9 @@ func (j *jwt) Middleware(r *http.Request) (*http.Request, error) {
 }
 
 // GenerateToken Generates and returns a new token object with payload.
-func (j *jwt) GenerateToken(payload Payload) (*Token, error) {
-	var (
-		claims    = make(jwts.MapClaims)
-		now       = time.Now()
-		expiredAt = now.Add(j.expiredTime)
-		refreshAt = now.Add(j.refreshTime)
-	)
-
-	claims[jwtId] = now.UnixNano()
-	claims[jwtIssuer] = j.issuer
-	claims[jwtIssueAt] = now.Unix()
-	claims[jwtExpired] = expiredAt.Unix()
-	for k, v := range payload {
-		switch k {
-		case jwtAudience, jwtExpired, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
-			// ignore the standard claims
-		default:
-			claims[k] = v
-		}
-	}
-
-	token, err := j.signToken(claims)
-	if err != nil {
-		return nil, err
-	}
-
-	return &Token{
-		Token:     token,
-		ExpiredAt: expiredAt,
-		RefreshAt: refreshAt,
-	}, nil
+func (j *jwt) GenerateToken(payload Payload) (token *Token, err error) {
+	token, _, err = j.generateToken(payload)
+	return
 }
 
 // RefreshToken Generates and returns a new token object from.
@@ -334,6 +314,41 @@ func (j *jwt) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Payl
 	return
 }
 
+// Generates and returns a new token object with payload.
+func (j *jwt) generateToken(payload Payload) (*Token, string, error) {
+	var (
+		claims    = make(jwts.MapClaims)
+		now       = time.Now()
+		expiredAt = now.Add(j.expiredTime)
+		refreshAt = now.Add(j.refreshTime)
+		id        = strconv.FormatInt(now.UnixNano(), 10)
+	)
+
+	claims[jwtId] = id
+	claims[jwtIssuer] = j.issuer
+	claims[jwtIssueAt] = now.Unix()
+	claims[jwtExpired] = expiredAt.Unix()
+	for k, v := range payload {
+		switch k {
+		case jwtAudience, jwtExpired, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
+			// ignore the standard claims
+		default:
+			claims[k] = v
+		}
+	}
+
+	token, err := j.signToken(claims)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return &Token{
+		Token:     token,
+		ExpiredAt: expiredAt,
+		RefreshAt: refreshAt,
+	}, id, nil
+}
+
 // Seeks and returns token from request.
 // 1.from header    Authorization: Bearer ${token}
 // 2.from query     ${url}?${key}=${token}
@@ -430,6 +445,10 @@ func (j *jwt) parseToken(token string, ignoreExpired ...bool) (jwts.MapClaims, e
 
 	claims := jt.Claims.(jwts.MapClaims)
 
+	if _, ok := claims[jwtId]; !ok {
+		return nil, errInvalidToken
+	}
+
 	if _, ok := claims[jwtIssueAt]; !ok {
 		return nil, errInvalidToken
 	}
@@ -438,7 +457,7 @@ func (j *jwt) parseToken(token string, ignoreExpired ...bool) (jwts.MapClaims, e
 		return nil, errInvalidToken
 	}
 
-	return jt.Claims.(jwts.MapClaims), nil
+	return claims, nil
 }
 
 // Signings and returns a token depend on the claims.
