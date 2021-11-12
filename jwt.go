@@ -15,49 +15,70 @@ import (
 )
 
 type (
-	Algorithm string
-
 	Payload map[string]interface{}
-
-	Cache interface {
-	}
 
 	JWT interface {
 		// Middleware Implemented basic JWT permission authentication.
 		Middleware(r *http.Request) (*http.Request, error)
-		// GenerateToken Generates and returns a new token object.
+
+		// GenerateToken Generates and returns a new token object with payload.
 		GenerateToken(payload Payload) (*Token, error)
-		// RefreshToken generates and returns a new token object depend on old token.
-		RefreshToken(token string) (*Token, error)
+
+		// RefreshToken Generates and returns a new token object from.
+		RefreshToken(r *http.Request) (*Token, error)
+
+		// RetreadToken Retreads and returns a new token object depend on old token.
+		// By default, the token expired error doesn't ignored.
+		// You can ignore expired error by setting the `ignoreExpired` parameter.
+		RetreadToken(token string, ignoreExpired ...bool) (*Token, error)
+
 		// GetToken Get token from request.
-		GetToken(r *http.Request) (*Token, error)
-		// GetPayload Get payload from request.
-		GetPayload(r *http.Request) (Payload, error)
+		// By default, the token expired error doesn't ignored.
+		// You can ignore expired error by setting the `ignoreExpired` parameter.
+		GetToken(r *http.Request, ignoreExpired ...bool) (*Token, error)
+
+		// GetPayload Retrieve payload from request.
+		// By default, the token expired error doesn't ignored.
+		// You can ignore expired error by setting the `ignoreExpired` parameter.
+		GetPayload(r *http.Request, ignoreExpired ...bool) (payload Payload, err error)
 	}
 )
 
 type Options struct {
-	Issuer     string
+	// Define the token's issuer.
+	// Using example: frontend or backend.
+	Issuer string
+
+	// Define the token's expired time.
+	// The default is 3600s.
+	ExpiredTime int
+
+	// Define the token's refresh time, Can't refreshed after the refresh time.
+	// When the refresh time is not set, the default value is half of expired time.
+	RefreshTime int
+
+	// Define the token seek locations within requests.
+	// Support header, form, cookie and query parameter.
+	// Support to seek multiple locations, Separate multiple seek locations with commas.
+	Locations string
+
+	// Define the signing method for generate token.
+	// Support multiple signing method such as HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384 and ES512
 	SignMethod string
-	SecretKey  string
 
-	//
-	ExpiredTime int64
-
-	//
-	RefreshTime int64
-
-	// Define the seek locations
-	// Support header,form,cookie and query
-	// Support to seek multiple locations, Separate multiple seek locations with commas
-	TokenSeeks string
+	// Define the secret key of HMAC.
+	// Only support secret value.
+	// The secret key is required, when the signing method is one of HS256, HS384 or HS512.
+	SecretKey string
 
 	// Define the public key of RSA or ECDSA.
-	// Support file path or key value.
+	// Support file path or value.
+	// The public key is required, when the signing method is one of RS256, RS384, RS512, ES256, ES384 and ES512.
 	PublicKey string
 
 	// Define the private key of RSA or ECDSA.
-	// Support file path or key value.
+	// Support file path or value.
+	// The private key is required, when the signing method is one of RS256, RS384, RS512, ES256, ES384 and ES512.
 	PrivateKey string
 }
 
@@ -94,13 +115,6 @@ const (
 )
 
 const (
-	tokenSeekFromHeader  = "header"
-	tokenSeekFromQuery   = "query"
-	tokenSeekFromCookie  = "cookie"
-	tokenSeekFromForm    = "form"
-	tokenSeekFieldHeader = "Authorization"
-	authorizationBearer  = "Bearer"
-
 	HS256 = "HS256"
 	HS512 = "HS512"
 	HS384 = "HS384"
@@ -111,6 +125,13 @@ const (
 	ES384 = "ES384"
 	ES512 = "ES512"
 
+	tokenSeekFromHeader  = "header"
+	tokenSeekFromQuery   = "query"
+	tokenSeekFromCookie  = "cookie"
+	tokenSeekFromForm    = "form"
+	tokenSeekFieldHeader = "Authorization"
+	authorizationBearer  = "Bearer"
+
 	defaultSignMethod     = HS256
 	defaultExpirationTime = time.Hour
 	defaultPayloadCtxKey  = "jwt_payload"
@@ -120,7 +141,7 @@ const (
 func NewJwt(opt *Options) (JWT, error) {
 	j := new(jwt)
 	j.setIssuer(opt.Issuer)
-	j.setTokenSeeks(opt.TokenSeeks)
+	j.setLocations(opt.Locations)
 	j.setExpiredTime(opt.ExpiredTime)
 	j.setRefreshTime(opt.RefreshTime)
 
@@ -195,15 +216,26 @@ func (j *jwt) GenerateToken(payload Payload) (*Token, error) {
 	}, nil
 }
 
-// RefreshToken generates and returns a new token object depend on old token.
-func (j *jwt) RefreshToken(token string) (*Token, error) {
+// RefreshToken Generates and returns a new token object from.
+func (j *jwt) RefreshToken(r *http.Request) (*Token, error) {
+	return j.RetreadToken(j.seekToken(r), true)
+}
+
+// RetreadToken Retreads and returns a new token object depend on old token.
+// By default, the token expired error doesn't ignored.
+// You can ignore expired error by setting the `ignoreExpired` parameter.
+func (j *jwt) RetreadToken(token string, ignoreExpired ...bool) (*Token, error) {
 	var (
 		err       error
 		claims    jwts.MapClaims
 		newClaims jwts.MapClaims
 	)
 
-	claims, err = j.parseToken(token, true)
+	if token == "" {
+		return nil, errMissingToken
+	}
+
+	claims, err = j.parseToken(token, ignoreExpired...)
 	if err != nil {
 		return nil, err
 	}
@@ -237,8 +269,10 @@ func (j *jwt) RefreshToken(token string) (*Token, error) {
 	}, nil
 }
 
-// GetToken Get token from request.
-func (j *jwt) GetToken(r *http.Request, isCareExpired ...bool) (*Token, error) {
+// GetToken Retrieve token from request.
+// By default, the token expired error doesn't ignored.
+// You can ignore expired error by setting the `ignoreExpired` parameter.
+func (j *jwt) GetToken(r *http.Request, ignoreExpired ...bool) (*Token, error) {
 	var token string
 
 	if v := r.Context().Value(defaultTokenCtxKey); v != nil {
@@ -247,7 +281,7 @@ func (j *jwt) GetToken(r *http.Request, isCareExpired ...bool) (*Token, error) {
 		return nil, errMissingToken
 	}
 
-	claims, err := j.parseToken(token, isCareExpired...)
+	claims, err := j.parseToken(token, ignoreExpired...)
 	if err != nil {
 		return nil, err
 	}
@@ -262,25 +296,27 @@ func (j *jwt) GetToken(r *http.Request, isCareExpired ...bool) (*Token, error) {
 	}, nil
 }
 
-// GetPayload Get payload from request.
-func (j *jwt) GetPayload(r *http.Request) (payload Payload, err error) {
+// GetPayload Retrieve payload from request.
+// By default, the token expired error doesn't ignored.
+// You can ignore expired error by setting the `ignoreExpired` parameter.
+func (j *jwt) GetPayload(r *http.Request, ignoreExpired ...bool) (payload Payload, err error) {
 	if v := r.Context().Value(defaultPayloadCtxKey); v != nil {
 		payload = v.(Payload)
 	} else {
-		payload, _, err = j.parseRequest(r)
+		payload, _, err = j.parseRequest(r, ignoreExpired...)
 	}
 
 	return
 }
 
 // Parses and returns the payload and token from requests.
-func (j *jwt) parseRequest(r *http.Request) (payload Payload, token string, err error) {
+func (j *jwt) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Payload, token string, err error) {
 	if token = j.seekToken(r); token == "" {
 		err = errMissingToken
 		return
 	}
 
-	claims, err := j.parseToken(token, true)
+	claims, err := j.parseToken(token, ignoreExpired...)
 	if err != nil {
 		return
 	}
@@ -468,7 +504,7 @@ func (j *jwt) setSigningMethod(signingMethod string) error {
 }
 
 // SetTokenLookup Set the token search location.
-func (j *jwt) setTokenSeeks(tokenLookup string) {
+func (j *jwt) setLocations(tokenLookup string) {
 	j.tokenSeeks = make([][2]string, 0)
 
 	for _, method := range strings.Split(tokenLookup, ",") {
@@ -494,7 +530,7 @@ func (j *jwt) setIssuer(issuer string) {
 // Set expiration time.
 // If only set the expiration time,
 // The refresh time will automatically be set to half of the expiration time.
-func (j *jwt) setExpiredTime(expirationTime int64) {
+func (j *jwt) setExpiredTime(expirationTime int) {
 	if expirationTime > 0 {
 		j.expiredTime = time.Duration(expirationTime) * time.Second
 	} else {
@@ -505,7 +541,7 @@ func (j *jwt) setExpiredTime(expirationTime int64) {
 // Set refresh time.
 // If only set the expiration time,
 // The refresh time will automatically be set to half of the expiration time.
-func (j *jwt) setRefreshTime(refreshTime int64) {
+func (j *jwt) setRefreshTime(refreshTime int) {
 	if refreshTime > 0 {
 		j.refreshTime = time.Duration(refreshTime) * time.Second
 	} else {
@@ -604,8 +640,4 @@ func (j *jwt) setPrivateKey(privateKey string) (err error) {
 
 func stringToBytes(str string) []byte {
 	return *(*[]byte)(unsafe.Pointer(&str))
-}
-
-func bytesToString(bytes []byte) string {
-	return *(*string)(unsafe.Pointer(&bytes))
 }
