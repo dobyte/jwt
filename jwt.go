@@ -4,34 +4,49 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"crypto/rsa"
+	"fmt"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
-	"unsafe"
 
 	jwts "github.com/dgrijalva/jwt-go"
+
+	"github.com/dobyte/jwt/internal/conv"
 )
 
 type (
 	Payload map[string]interface{}
 
 	JWT interface {
+		// Ctx Which shallowly clones current object and sets the context for next operation.
+		Ctx(ctx context.Context) JWT
+
+		// SetAdapter Set a cache adapter for authentication.
+		SetAdapter(adapter Adapter) JWT
+
 		// Middleware Implemented basic JWT permission authentication.
 		Middleware(r *http.Request) (*http.Request, error)
 
 		// GenerateToken Generates and returns a new token object with payload.
 		GenerateToken(payload Payload) (*Token, error)
 
-		// RefreshToken Generates and returns a new token object from.
-		RefreshToken(r *http.Request) (*Token, error)
-
 		// RetreadToken Retreads and returns a new token object depend on old token.
 		// By default, the token expired error doesn't ignored.
 		// You can ignore expired error by setting the `ignoreExpired` parameter.
 		RetreadToken(token string, ignoreExpired ...bool) (*Token, error)
+
+		// RefreshToken Generates and returns a new token object from.
+		RefreshToken(r *http.Request) (*Token, error)
+
+		// DestroyToken Destroy the cache of a token.
+		DestroyToken(r *http.Request) error
+
+		// DestroyIdentity Destroy the identification mark.
+		DestroyIdentity(identity interface{}) error
 
 		// GetToken Get token from request.
 		// By default, the token expired error doesn't ignored.
@@ -67,26 +82,31 @@ type Options struct {
 	// Support multiple signing method such as HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384 and ES512
 	SignMethod string
 
-	// Define the secret key of HMAC.
+	// Define the secret cacheKey of HMAC.
 	// Only support secret value.
-	// The secret key is required, when the signing method is one of HS256, HS384 or HS512.
+	// The secret cacheKey is required, when the signing method is one of HS256, HS384 or HS512.
 	SecretKey string
 
-	// Define the public key of RSA or ECDSA.
+	// Define the public cacheKey of RSA or ECDSA.
 	// Support file path or value.
-	// The public key is required, when the signing method is one of RS256, RS384, RS512, ES256, ES384 and ES512.
+	// The public cacheKey is required, when the signing method is one of RS256, RS384, RS512, ES256, ES384 and ES512.
 	PublicKey string
 
-	// Define the private key of RSA or ECDSA.
+	// Define the private cacheKey of RSA or ECDSA.
 	// Support file path or value.
-	// The private key is required, when the signing method is one of RS256, RS384, RS512, ES256, ES384 and ES512.
+	// The private cacheKey is required, when the signing method is one of RS256, RS384, RS512, ES256, ES384 and ES512.
 	PrivateKey string
+
+	// Define the identity cacheKey of the claims.
+	// After opening the identification identifier and cache interface, the system will
+	// construct a unique authorization identifier for each token. If the same user is
+	// authorized to log in elsewhere, the previous token will no longer be valid.
+	IdentityKey string
 }
 
 type jwt struct {
 	issuer          string
 	signMethod      string
-	expiredMode     int
 	expiredTime     time.Duration
 	refreshTime     time.Duration
 	tokenCtxKey     string
@@ -96,6 +116,9 @@ type jwt struct {
 	ecdsaPublicKey  *ecdsa.PublicKey
 	ecdsaPrivateKey *ecdsa.PrivateKey
 	secretKey       []byte
+	ctx             context.Context
+	identityKey     string
+	adapter         Adapter
 }
 
 type Token struct {
@@ -137,6 +160,7 @@ const (
 	defaultExpirationTime = time.Hour
 	defaultPayloadCtxKey  = "JWT_PAYLOAD"
 	defaultTokenCtxKey    = "JWT_TOKEN"
+	defaultIdentityKey    = "jwt:%s:identity:%s"
 )
 
 func NewJwt(opt *Options) (JWT, error) {
@@ -154,6 +178,7 @@ func (j *jwt) init(opt *Options) (err error) {
 	j.setLocations(opt.Locations)
 	j.setExpiredTime(opt.ExpiredTime)
 	j.setRefreshTime(opt.RefreshTime)
+	j.setIdentityKey(opt.IdentityKey)
 
 	if err = j.setSigningMethod(opt.SignMethod); err != nil {
 		return
@@ -176,6 +201,19 @@ func (j *jwt) init(opt *Options) (err error) {
 	return
 }
 
+// Ctx Which shallowly clones current object and sets the context for next operation.
+func (j *jwt) Ctx(ctx context.Context) JWT {
+	newJwt := j.clone()
+	newJwt.ctx = ctx
+	return newJwt
+}
+
+// SetAdapter Set a cache adapter for authentication.
+func (j *jwt) SetAdapter(adapter Adapter) JWT {
+	j.adapter = adapter
+	return j
+}
+
 // Middleware Implemented basic JWT permission authentication.
 func (j *jwt) Middleware(r *http.Request) (*http.Request, error) {
 	payload, token, err := j.parseRequest(r)
@@ -191,9 +229,50 @@ func (j *jwt) Middleware(r *http.Request) (*http.Request, error) {
 }
 
 // GenerateToken Generates and returns a new token object with payload.
-func (j *jwt) GenerateToken(payload Payload) (token *Token, err error) {
-	token, _, err = j.generateToken(payload)
-	return
+func (j *jwt) GenerateToken(payload Payload) (*Token, error) {
+	if j.identityKey != "" {
+		if _, ok := payload[j.identityKey]; !ok {
+			return nil, errIdentityMissing
+		}
+	}
+
+	var (
+		claims    = make(jwts.MapClaims)
+		now       = time.Now()
+		expiredAt = now.Add(j.expiredTime)
+		refreshAt = now.Add(j.refreshTime)
+		id        = strconv.FormatInt(now.UnixNano(), 10)
+	)
+
+	claims[jwtId] = id
+	claims[jwtIssuer] = j.issuer
+	claims[jwtIssueAt] = now.Unix()
+	claims[jwtExpired] = expiredAt.Unix()
+	for k, v := range payload {
+		switch k {
+		case jwtAudience, jwtExpired, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
+			// ignore the standard claims
+		default:
+			claims[k] = v
+		}
+	}
+
+	token, err := j.signToken(claims)
+	if err != nil {
+		return nil, err
+	}
+
+	if j.identityKey != "" {
+		if err = j.saveIdentity(payload[j.identityKey], id); err != nil {
+			return nil, err
+		}
+	}
+
+	return &Token{
+		Token:     token,
+		ExpiredAt: expiredAt,
+		RefreshAt: refreshAt,
+	}, nil
 }
 
 // RefreshToken Generates and returns a new token object from.
@@ -205,22 +284,21 @@ func (j *jwt) RefreshToken(r *http.Request) (*Token, error) {
 // By default, the token expired error doesn't ignored.
 // You can ignore expired error by setting the `ignoreExpired` parameter.
 func (j *jwt) RetreadToken(token string, ignoreExpired ...bool) (*Token, error) {
+	if token == "" {
+		return nil, errMissingToken
+	}
+
 	var (
 		err       error
 		claims    jwts.MapClaims
 		newClaims jwts.MapClaims
+		now       = time.Now()
 	)
-
-	if token == "" {
-		return nil, errMissingToken
-	}
 
 	claims, err = j.parseToken(token, ignoreExpired...)
 	if err != nil {
 		return nil, err
 	}
-
-	now := time.Now()
 
 	if (int64(claims[jwtIssueAt].(float64)) + int64(j.refreshTime/time.Second)) < now.Unix() {
 		return nil, errExpiredToken
@@ -242,11 +320,52 @@ func (j *jwt) RetreadToken(token string, ignoreExpired ...bool) (*Token, error) 
 		return nil, err
 	}
 
-	return &Token{
-		Token:     token,
-		ExpiredAt: expiredAt,
-		RefreshAt: refreshAt,
-	}, nil
+	object := &Token{Token: token, ExpiredAt: expiredAt, RefreshAt: refreshAt}
+
+	if j.identityKey == "" {
+		return object, nil
+	}
+
+	if _, ok := claims[j.identityKey]; !ok {
+		return nil, errIdentityMissing
+	}
+
+	if err = j.verifyIdentity(claims[j.identityKey], claims[jwtId], false); err != nil {
+		return nil, err
+	}
+
+	if err = j.saveIdentity(claims[j.identityKey], claims[jwtId]); err != nil {
+		return nil, err
+	}
+
+	return object, nil
+}
+
+// DestroyToken Destroy the cache of a token.
+func (j *jwt) DestroyToken(r *http.Request) error {
+	if j.identityKey == "" {
+		return nil
+	}
+
+	claims, err := j.parseToken(j.seekToken(r), true)
+	if err != nil {
+		return err
+	}
+
+	if _, ok := claims[j.identityKey]; !ok {
+		return errIdentityMissing
+	}
+
+	if err = j.verifyIdentity(claims[j.identityKey], claims[jwtId], true); err != nil {
+		return err
+	}
+
+	return j.removeIdentity(claims[j.identityKey])
+}
+
+// DestroyIdentity Destroy the identification mark.
+func (j *jwt) DestroyIdentity(identity interface{}) error {
+	return j.removeIdentity(identity)
 }
 
 // GetToken Retrieve token from request.
@@ -301,6 +420,12 @@ func (j *jwt) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Payl
 		return
 	}
 
+	if j.identityKey != "" {
+		if err = j.verifyIdentity(claims[j.identityKey], claims[jwtId], false); err != nil {
+			return
+		}
+	}
+
 	payload = make(Payload)
 	for k, v := range claims {
 		switch k {
@@ -314,46 +439,11 @@ func (j *jwt) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Payl
 	return
 }
 
-// Generates and returns a new token object with payload.
-func (j *jwt) generateToken(payload Payload) (*Token, string, error) {
-	var (
-		claims    = make(jwts.MapClaims)
-		now       = time.Now()
-		expiredAt = now.Add(j.expiredTime)
-		refreshAt = now.Add(j.refreshTime)
-		id        = strconv.FormatInt(now.UnixNano(), 10)
-	)
-
-	claims[jwtId] = id
-	claims[jwtIssuer] = j.issuer
-	claims[jwtIssueAt] = now.Unix()
-	claims[jwtExpired] = expiredAt.Unix()
-	for k, v := range payload {
-		switch k {
-		case jwtAudience, jwtExpired, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
-			// ignore the standard claims
-		default:
-			claims[k] = v
-		}
-	}
-
-	token, err := j.signToken(claims)
-	if err != nil {
-		return nil, "", err
-	}
-
-	return &Token{
-		Token:     token,
-		ExpiredAt: expiredAt,
-		RefreshAt: refreshAt,
-	}, id, nil
-}
-
 // Seeks and returns token from request.
 // 1.from header    Authorization: Bearer ${token}
-// 2.from query     ${url}?${key}=${token}
-// 3.from cookie    Cookie: ${key}=${token}
-// 4.from form      ${key}=${token}
+// 2.from query     ${url}?${cacheKey}=${token}
+// 3.from cookie    Cookie: ${cacheKey}=${token}
+// 4.from form      ${cacheKey}=${token}
 func (j *jwt) seekToken(r *http.Request) (token string) {
 	for _, item := range j.tokenSeeks {
 		if len(token) > 0 {
@@ -546,6 +636,14 @@ func (j *jwt) setIssuer(issuer string) {
 	j.issuer = issuer
 }
 
+// Set the identity of the token.
+// After opening the identification identifier and cache interface, the system will
+// construct a unique authorization identifier for each token. If the same user is
+// authorized to log in elsewhere, the previous token will no longer be valid.
+func (j *jwt) setIdentityKey(identityKey string) {
+	j.identityKey = identityKey
+}
+
 // Set expiration time.
 // If only set the expiration time,
 // The refresh time will automatically be set to half of the expiration time.
@@ -568,19 +666,19 @@ func (j *jwt) setRefreshTime(refreshTime int) {
 	}
 }
 
-// Set secret key.
+// Set secret cacheKey.
 func (j *jwt) setSecretKey(secretKey string) (err error) {
 	if secretKey == "" {
 		return errInvalidSecretKey
 	}
 
-	j.secretKey = stringToBytes(secretKey)
+	j.secretKey = conv.StringToBytes(secretKey)
 
 	return
 }
 
-// Set public key.
-// Allow setting of public key file or public key.
+// Set public cacheKey.
+// Allow setting of public cacheKey file or public cacheKey.
 func (j *jwt) setPublicKey(publicKey string) (err error) {
 	if publicKey == "" {
 		return errInvalidPublicKey
@@ -592,7 +690,7 @@ func (j *jwt) setPublicKey(publicKey string) (err error) {
 	)
 
 	if fileInfo, err = os.Stat(publicKey); err != nil {
-		key = stringToBytes(publicKey)
+		key = conv.StringToBytes(publicKey)
 	} else {
 		if fileInfo.Size() == 0 {
 			return errInvalidPublicKey
@@ -618,8 +716,8 @@ func (j *jwt) setPublicKey(publicKey string) (err error) {
 	return
 }
 
-// Set private key.
-// Allow setting of private key file or private key.
+// Set private cacheKey.
+// Allow setting of private cacheKey file or private cacheKey.
 func (j *jwt) setPrivateKey(privateKey string) (err error) {
 	if privateKey == "" {
 		return errInvalidPrivateKey
@@ -631,7 +729,7 @@ func (j *jwt) setPrivateKey(privateKey string) (err error) {
 	)
 
 	if fileInfo, err = os.Stat(privateKey); err != nil {
-		key = stringToBytes(privateKey)
+		key = conv.StringToBytes(privateKey)
 	} else {
 		if fileInfo.Size() == 0 {
 			return errInvalidPrivateKey
@@ -657,6 +755,85 @@ func (j *jwt) setPrivateKey(privateKey string) (err error) {
 	return
 }
 
-func stringToBytes(str string) []byte {
-	return *(*[]byte)(unsafe.Pointer(&str))
+// returns context object
+func (j *jwt) getCtx() context.Context {
+	if j.ctx == nil {
+		return context.Background()
+	}
+	return j.ctx
+}
+
+// returns a shallow copy of current object.
+func (j *jwt) clone() *jwt {
+	return &jwt{
+		issuer:          j.issuer,
+		signMethod:      j.signMethod,
+		expiredTime:     j.expiredTime,
+		refreshTime:     j.refreshTime,
+		tokenCtxKey:     j.tokenCtxKey,
+		tokenSeeks:      j.tokenSeeks,
+		rsaPublicKey:    j.rsaPublicKey,
+		rsaPrivateKey:   j.rsaPrivateKey,
+		ecdsaPublicKey:  j.ecdsaPublicKey,
+		ecdsaPrivateKey: j.ecdsaPrivateKey,
+		secretKey:       j.secretKey,
+		adapter:         j.adapter,
+		identityKey:     j.identityKey,
+		ctx:             j.ctx,
+	}
+}
+
+// build a cache key by identity.
+func (j *jwt) cacheKey(identity interface{}) string {
+	return fmt.Sprintf(defaultIdentityKey, j.issuer, conv.String(identity))
+}
+
+// save identification mark.
+func (j *jwt) saveIdentity(identity, jid interface{}) error {
+	if j.adapter == nil {
+		return nil
+	}
+
+	return j.adapter.Set(j.getCtx(), j.cacheKey(identity), conv.String(jid), time.Duration(math.Max(float64(j.expiredTime), float64(j.refreshTime))))
+}
+
+// verify identification mark.
+func (j *jwt) verifyIdentity(identity, jid interface{}, ignoreMissed bool) error {
+	if j.adapter == nil {
+		return nil
+	}
+
+	v, err := j.adapter.Get(j.getCtx(), j.cacheKey(identity))
+	if err != nil {
+		return err
+	}
+
+	oldJid := conv.String(v)
+
+	if oldJid == "" {
+		if ignoreMissed {
+			return nil
+		} else {
+			return errInvalidToken
+		}
+	}
+
+	if conv.String(jid) != oldJid {
+		return errAuthElsewhere
+	}
+
+	return nil
+}
+
+// remove identification mark.
+func (j *jwt) removeIdentity(identity interface{}) error {
+	if j.adapter == nil {
+		return nil
+	}
+
+	if _, err := j.adapter.Remove(j.getCtx(), j.cacheKey(identity)); err != nil {
+		return err
+	}
+
+	return nil
 }

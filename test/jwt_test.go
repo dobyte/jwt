@@ -3,8 +3,9 @@ package main_test
 import (
 	"net/http"
 	"testing"
-	"time"
 
+	"github.com/gogf/gcache-adapter/adapter"
+	"github.com/gogf/gf/database/gredis"
 	"github.com/gogf/gf/frame/g"
 	"github.com/gogf/gf/net/ghttp"
 
@@ -17,22 +18,40 @@ type Response struct {
 	Data    interface{} `json:"data"`
 }
 
-var auth, _ = jwt.NewJwt(&jwt.Options{
-	Issuer:      "backend",
-	SignMethod:  jwt.HS256,
-	SecretKey:   "secret",
-	ExpiredTime: 3600,
-	Locations:   "header:Authorization",
-})
+var (
+	auth    jwt.JWT
+	payload = jwt.Payload{
+		"uid":     1,
+		"account": "fuxiao",
+	}
+)
 
-func responseFail(r *ghttp.Request, status int, message string) {
+func init() {
+	auth, _ = jwt.NewJwt(&jwt.Options{
+		Issuer:      "backend",
+		SignMethod:  jwt.HS256,
+		SecretKey:   "secret",
+		ExpiredTime: 3600,
+		Locations:   "header:Authorization",
+		IdentityKey: "uid",
+	})
+
+	gredis.SetConfig(&gredis.Config{
+		Host: "127.0.0.1",
+		Port: 6379,
+		Db:   1,
+	}, "jwt")
+	auth.SetAdapter(adapter.NewRedis(g.Redis("jwt")))
+}
+
+func failed(r *ghttp.Request, status int, message string) {
 	_ = r.Response.WriteJsonExit(Response{
 		Status:  status,
 		Message: message,
 	})
 }
 
-func responseSuccess(r *ghttp.Request, message string, data interface{}) {
+func success(r *ghttp.Request, message string, data interface{}) {
 	_ = r.Response.WriteJsonExit(Response{
 		Status:  http.StatusOK,
 		Message: message,
@@ -45,13 +64,15 @@ func middleware(r *ghttp.Request) {
 	if err != nil {
 		switch {
 		case jwt.IsInvalidToken(err):
-			responseFail(r, http.StatusUnauthorized, "token is invalid")
+			failed(r, http.StatusUnauthorized, "token is invalid")
 		case jwt.IsExpiredToken(err):
-			responseFail(r, http.StatusUnauthorized, "token is expired")
+			failed(r, http.StatusUnauthorized, "token is expired")
 		case jwt.IsMissingToken(err):
-			responseFail(r, http.StatusUnauthorized, "token is missing")
+			failed(r, http.StatusUnauthorized, "token is missing")
+		case jwt.IsAuthElsewhere(err):
+			failed(r, http.StatusUnauthorized, "auth elsewhere")
 		default:
-			responseFail(r, http.StatusUnauthorized, "unauthorized")
+			failed(r, http.StatusUnauthorized, "unauthorized")
 		}
 	}
 
@@ -64,44 +85,45 @@ func Test_Server(t *testing.T) {
 	s := g.Server()
 
 	s.Group("", func(group *ghttp.RouterGroup) {
+		// login
 		group.POST("/login", func(r *ghttp.Request) {
-			token, err := auth.GenerateToken(jwt.Payload{
-				"id":      1,
-				"account": "fuxiao",
-			})
-
+			token, err := auth.Ctx(r.Context()).GenerateToken(payload)
 			if err != nil {
-				responseFail(r, http.StatusBadRequest, "授权失败")
-				return
+				failed(r, http.StatusBadRequest, err.Error())
 			}
 
-			responseSuccess(r, "login success", token)
+			success(r, "login success", token)
 		})
 
+		// logout
 		group.DELETE("/logout", func(r *ghttp.Request) {
-			responseSuccess(r, "logout success", nil)
-		})
-
-		group.PUT("/refresh", func(r *ghttp.Request) {
-			token, err := auth.RefreshToken(r.Request)
-			if err != nil {
-				responseFail(r, http.StatusBadRequest, "refresh token failed")
+			if err := auth.Ctx(r.Context()).DestroyToken(r.Request); err != nil {
+				failed(r, http.StatusBadRequest, err.Error())
 			}
 
-			responseSuccess(r, "刷新成功", token)
+			success(r, "logout success", nil)
 		})
-	})
 
-	s.Group("", func(group *ghttp.RouterGroup) {
+		// refresh token
+		group.PUT("/refresh", func(r *ghttp.Request) {
+			token, err := auth.Ctx(r.Context()).RefreshToken(r.Request)
+			if err != nil {
+				failed(r, http.StatusBadRequest, err.Error())
+			}
+
+			success(r, "刷新成功", token)
+		})
+
 		group.Middleware(middleware)
 
+		// get user profile information
 		group.GET("/profile", func(r *ghttp.Request) {
-			payload, err := auth.GetPayload(r.Request)
+			payload, err := auth.Ctx(r.Context()).GetPayload(r.Request)
 			if err != nil {
-				responseFail(r, http.StatusBadRequest, err.Error())
+				failed(r, http.StatusBadRequest, err.Error())
 			}
 
-			responseSuccess(r, "success", payload)
+			success(r, "success", payload)
 		})
 	})
 
@@ -109,30 +131,8 @@ func Test_Server(t *testing.T) {
 	s.Run()
 }
 
-func Test_GenerateToken(t *testing.T) {
-	token, err := auth.GenerateToken(jwt.Payload{
-		"user_id": 1,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Log(token)
-
-	time.Sleep(6 * time.Second)
-
-	token, err = auth.RetreadToken(token.Token)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	t.Log(token)
-}
-
 func Test_Middleware(t *testing.T) {
-	token, err := auth.GenerateToken(jwt.Payload{
-		"user_id": 1,
-	})
+	token, err := auth.GenerateToken(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,23 +144,21 @@ func Test_Middleware(t *testing.T) {
 
 	r.Header.Add("Authorization", "Bearer "+token.Token)
 
-	if r, err = auth.Middleware(r); err != nil {
+	if r, err = auth.Ctx(r.Context()).Middleware(r); err != nil {
 		t.Fatal(err)
 	}
 
-	if token, err = auth.RefreshToken(r); err != nil {
+	if token, err = auth.Ctx(r.Context()).RefreshToken(r); err != nil {
 		t.Fatal(err)
 	}
 
-	payload, err := auth.GetPayload(r)
-	if err != nil {
+	if payload, err = auth.Ctx(r.Context()).GetPayload(r); err != nil {
 		t.Fatal(err)
 	} else {
 		t.Log(payload)
 	}
 
-	token, err = auth.GetToken(r)
-	if err != nil {
+	if token, err = auth.Ctx(r.Context()).GetToken(r); err != nil {
 		t.Fatal(err)
 	} else {
 		t.Log(token)
