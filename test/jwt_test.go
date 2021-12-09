@@ -163,4 +163,10 @@ func Test_Middleware(t *testing.T) {
 	} else {
 		t.Log(token)
 	}
+
+	if identity, err := auth.GetIdentity(r); err != nil {
+		t.Fatal(err)
+	} else {
+		t.Log(identity)
+	}
 }

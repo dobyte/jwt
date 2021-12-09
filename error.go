@@ -13,7 +13,7 @@ var (
 	errInvalidToken = errors.New("token is invalid")
 
 	// indicates that there is no corresponding identity information in the payload
-	errIdentityMissing = errors.New("identity is missing")
+	errMissingIdentity = errors.New("identity is missing")
 
 	// indicates that the same identity is logged in elsewhere
 	errAuthElsewhere = errors.New("auth elsewhere")
@@ -51,5 +51,5 @@ func IsAuthElsewhere(err error) bool {
 }
 
 func IsIdentityMissing(err error) bool {
-	return errors.Is(err, errIdentityMissing)
+	return errors.Is(err, errMissingIdentity)
 }

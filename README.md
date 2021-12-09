@@ -48,6 +48,11 @@ GetToken(r *http.Request, ignoreExpired ...bool) (*Token, error)
 // By default, the token expired error doesn't ignored.
 // You can ignore expired error by setting the `ignoreExpired` parameter.
 GetPayload(r *http.Request, ignoreExpired ...bool) (payload Payload, err error)
+
+// GetIdentity Retrieve identity from request.
+// By default, the token expired error doesn't ignored.
+// You can ignore expired error by setting the `ignoreExpired` parameter.
+GetIdentity(r *http.Request, ignoreExpired ...bool) (interface{}, error)
 ```
 
 Demo

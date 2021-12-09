@@ -57,6 +57,11 @@ type (
 		// By default, the token expired error doesn't ignored.
 		// You can ignore expired error by setting the `ignoreExpired` parameter.
 		GetPayload(r *http.Request, ignoreExpired ...bool) (payload Payload, err error)
+
+		// GetIdentity Retrieve identity from request.
+		// By default, the token expired error doesn't ignored.
+		// You can ignore expired error by setting the `ignoreExpired` parameter.
+		GetIdentity(r *http.Request, ignoreExpired ...bool) (interface{}, error)
 	}
 )
 
@@ -232,7 +237,7 @@ func (j *jwt) Middleware(r *http.Request) (*http.Request, error) {
 func (j *jwt) GenerateToken(payload Payload) (*Token, error) {
 	if j.identityKey != "" {
 		if _, ok := payload[j.identityKey]; !ok {
-			return nil, errIdentityMissing
+			return nil, errMissingIdentity
 		}
 	}
 
@@ -327,7 +332,7 @@ func (j *jwt) RetreadToken(token string, ignoreExpired ...bool) (*Token, error) 
 	}
 
 	if _, ok := claims[j.identityKey]; !ok {
-		return nil, errIdentityMissing
+		return nil, errMissingIdentity
 	}
 
 	if err = j.verifyIdentity(claims[j.identityKey], claims[jwtId], false); err != nil {
@@ -353,7 +358,7 @@ func (j *jwt) DestroyToken(r *http.Request) error {
 	}
 
 	if _, ok := claims[j.identityKey]; !ok {
-		return errIdentityMissing
+		return errMissingIdentity
 	}
 
 	if err = j.verifyIdentity(claims[j.identityKey], claims[jwtId], true); err != nil {
@@ -406,6 +411,27 @@ func (j *jwt) GetPayload(r *http.Request, ignoreExpired ...bool) (payload Payloa
 	}
 
 	return
+}
+
+// GetIdentity Retrieve identity from request.
+// By default, the token expired error doesn't ignored.
+// You can ignore expired error by setting the `ignoreExpired` parameter.
+func (j *jwt) GetIdentity(r *http.Request, ignoreExpired ...bool) (interface{}, error) {
+	if j.identityKey == "" {
+		return nil, errMissingIdentity
+	}
+
+	payload, err := j.GetPayload(r, ignoreExpired...)
+	if err != nil {
+		return nil, err
+	}
+
+	identity, ok := payload[j.identityKey]
+	if !ok {
+		return nil, errMissingIdentity
+	}
+
+	return identity, nil
 }
 
 // Parses and returns the payload and token from requests.
