@@ -1,6 +1,6 @@
 /**
- * @Author: wanglin
- * @Author: wanglin@vspn.com
+ * @Author: fuxiao
+ * @Author: 576101059@qq.com
  * @Date: 2021/11/30 10:59
  * @Desc: TODO
  */
@@ -13,7 +13,7 @@ import (
 )
 
 type (
-	Adapter interface {
+	Store interface {
 		Get(ctx context.Context, key interface{}) (interface{}, error)
 
 		Set(ctx context.Context, key interface{}, value interface{}, duration time.Duration) error

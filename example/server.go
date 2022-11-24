@@ -1,13 +1,11 @@
-package main_test
+package main
 
 import (
-	"net/http"
-	"testing"
-
 	"github.com/gogf/gcache-adapter/adapter"
 	"github.com/gogf/gf/database/gredis"
 	"github.com/gogf/gf/frame/g"
 	"github.com/gogf/gf/net/ghttp"
+	"net/http"
 
 	"github.com/dobyte/jwt"
 )
@@ -19,7 +17,7 @@ type Response struct {
 }
 
 var (
-	auth    jwt.JWT
+	auth    *jwt.JWT
 	payload = jwt.Payload{
 		"uid":     1,
 		"account": "fuxiao",
@@ -27,21 +25,21 @@ var (
 )
 
 func init() {
-	auth, _ = jwt.NewJwt(&jwt.Options{
-		Issuer:      "backend",
-		SignMethod:  jwt.HS256,
-		SecretKey:   "secret",
-		ExpiredTime: 3600,
-		Locations:   "header:Authorization",
-		IdentityKey: "uid",
-	})
-
 	gredis.SetConfig(&gredis.Config{
 		Host: "127.0.0.1",
 		Port: 6379,
 		Db:   1,
 	}, "jwt")
-	auth.SetAdapter(adapter.NewRedis(g.Redis("jwt")))
+
+	auth = jwt.NewJWT(
+		jwt.WithIssuer("backend"),
+		jwt.WithSignAlgorithm(jwt.HS256),
+		jwt.WithSecretKey("secret"),
+		jwt.WithValidDuration(3600),
+		jwt.WithLookupLocations("header:Authorization"),
+		jwt.WithIdentityKey("uid"),
+		jwt.WithStore(adapter.NewRedis(g.Redis("jwt"))),
+	)
 }
 
 func failed(r *ghttp.Request, status int, message string) {
@@ -60,7 +58,7 @@ func success(r *ghttp.Request, message string, data interface{}) {
 }
 
 func middleware(r *ghttp.Request) {
-	request, err := auth.Middleware(r.Request)
+	request, err := auth.Http().Middleware(r.Request)
 	if err != nil {
 		switch {
 		case jwt.IsInvalidToken(err):
@@ -81,13 +79,13 @@ func middleware(r *ghttp.Request) {
 	r.Middleware.Next()
 }
 
-func Test_Server(t *testing.T) {
+func main() {
 	s := g.Server()
 
 	s.Group("", func(group *ghttp.RouterGroup) {
 		// login
 		group.POST("/login", func(r *ghttp.Request) {
-			token, err := auth.Ctx(r.Context()).GenerateToken(payload)
+			token, err := auth.GenerateToken(payload)
 			if err != nil {
 				failed(r, http.StatusBadRequest, err.Error())
 			}
@@ -97,7 +95,7 @@ func Test_Server(t *testing.T) {
 
 		// logout
 		group.DELETE("/logout", func(r *ghttp.Request) {
-			if err := auth.Ctx(r.Context()).DestroyToken(r.Request); err != nil {
+			if err := auth.Http().DestroyToken(r.Request); err != nil {
 				failed(r, http.StatusBadRequest, err.Error())
 			}
 
@@ -106,67 +104,27 @@ func Test_Server(t *testing.T) {
 
 		// refresh token
 		group.PUT("/refresh", func(r *ghttp.Request) {
-			token, err := auth.Ctx(r.Context()).RefreshToken(r.Request)
+			token, err := auth.Http().RefreshToken(r.Request)
 			if err != nil {
 				failed(r, http.StatusBadRequest, err.Error())
 			}
 
-			success(r, "刷新成功", token)
+			success(r, "refresh success", token)
 		})
 
 		group.Middleware(middleware)
 
 		// get user profile information
 		group.GET("/profile", func(r *ghttp.Request) {
-			payload, err := auth.Ctx(r.Context()).GetPayload(r.Request)
+			info, err := auth.Http().ExtractPayload(r.Request)
 			if err != nil {
 				failed(r, http.StatusBadRequest, err.Error())
 			}
 
-			success(r, "success", payload)
+			success(r, "get profile success", info)
 		})
 	})
 
 	s.SetPort(8888)
 	s.Run()
-}
-
-func Test_Middleware(t *testing.T) {
-	token, err := auth.GenerateToken(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	r, err := http.NewRequest(http.MethodGet, "/", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	r.Header.Add("Authorization", "Bearer "+token.Token)
-
-	if r, err = auth.Ctx(r.Context()).Middleware(r); err != nil {
-		t.Fatal(err)
-	}
-
-	if token, err = auth.Ctx(r.Context()).RefreshToken(r); err != nil {
-		t.Fatal(err)
-	}
-
-	if payload, err = auth.Ctx(r.Context()).GetPayload(r); err != nil {
-		t.Fatal(err)
-	} else {
-		t.Log(payload)
-	}
-
-	if token, err = auth.Ctx(r.Context()).GetToken(r); err != nil {
-		t.Fatal(err)
-	} else {
-		t.Log(token)
-	}
-
-	if identity, err := auth.GetIdentity(r); err != nil {
-		t.Fatal(err)
-	} else {
-		t.Log(identity)
-	}
 }

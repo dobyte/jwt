@@ -19,10 +19,10 @@ var (
 	errAuthElsewhere = errors.New("auth elsewhere")
 
 	// indicates that the signing method of the token is inconsistent with the configured signing method
-	errSigningMethodNotMatch = errors.New("signing method does not match")
+	errSignAlgorithmNotMatch = errors.New("sign algorithm does not match")
 
-	// indicates that the signing signMethod is invalid, needs to be HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384 and ES512
-	errInvalidSigningMethod = errors.New("invalid signing method")
+	// indicates that the sign algorithm is invalid, must be one of HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384 and ES512
+	errInvalidSignAlgorithm = errors.New("invalid sign algorithm")
 
 	// indicates that the given secret cacheKey is invalid
 	errInvalidSecretKey = errors.New("invalid secret cacheKey")
@@ -30,7 +30,7 @@ var (
 	// indicates that the given private cacheKey is invalid
 	errInvalidPrivateKey = errors.New("invalid private cacheKey")
 
-	// indicates the the given public cacheKey is invalid
+	// indicates the given public cacheKey is invalid
 	errInvalidPublicKey = errors.New("invalid public cacheKey")
 )
 
@@ -52,4 +52,8 @@ func IsAuthElsewhere(err error) bool {
 
 func IsIdentityMissing(err error) bool {
 	return errors.Is(err, errMissingIdentity)
+}
+
+func IsInvalidSignAlgorithm(err error) bool {
+	return errors.Is(err, errInvalidSignAlgorithm)
 }

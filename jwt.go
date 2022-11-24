@@ -1,136 +1,20 @@
 package jwt
 
 import (
-	"context"
-	"crypto/ecdsa"
-	"crypto/rsa"
 	"fmt"
+	jwts "github.com/dgrijalva/jwt-go"
+	"github.com/dobyte/jwt/internal/conv"
 	"io/ioutil"
 	"math"
-	"net/http"
 	"os"
 	"strconv"
-	"strings"
+	"sync"
 	"time"
-
-	jwts "github.com/dgrijalva/jwt-go"
-
-	"github.com/dobyte/jwt/internal/conv"
 )
 
-type (
-	Payload map[string]interface{}
-
-	JWT interface {
-		// Ctx Which shallowly clones current object and sets the context for next operation.
-		Ctx(ctx context.Context) JWT
-
-		// SetAdapter Set a cache adapter for authentication.
-		SetAdapter(adapter Adapter) JWT
-
-		// Middleware Implemented basic JWT permission authentication.
-		Middleware(r *http.Request) (*http.Request, error)
-
-		// GenerateToken Generates and returns a new token object with payload.
-		GenerateToken(payload Payload) (*Token, error)
-
-		// RetreadToken Retreads and returns a new token object depend on old token.
-		// By default, the token expired error doesn't ignored.
-		// You can ignore expired error by setting the `ignoreExpired` parameter.
-		RetreadToken(token string, ignoreExpired ...bool) (*Token, error)
-
-		// RefreshToken Generates and returns a new token object from.
-		RefreshToken(r *http.Request) (*Token, error)
-
-		// DestroyToken Destroy the cache of a token.
-		DestroyToken(r *http.Request) error
-
-		// DestroyIdentity Destroy the identification mark.
-		DestroyIdentity(identity interface{}) error
-
-		// GetToken Get token from request.
-		// By default, the token expired error doesn't ignored.
-		// You can ignore expired error by setting the `ignoreExpired` parameter.
-		GetToken(r *http.Request, ignoreExpired ...bool) (*Token, error)
-
-		// GetPayload Retrieve payload from request.
-		// By default, the token expired error doesn't ignored.
-		// You can ignore expired error by setting the `ignoreExpired` parameter.
-		GetPayload(r *http.Request, ignoreExpired ...bool) (payload Payload, err error)
-
-		// GetIdentity Retrieve identity from request.
-		// By default, the token expired error doesn't ignored.
-		// You can ignore expired error by setting the `ignoreExpired` parameter.
-		GetIdentity(r *http.Request, ignoreExpired ...bool) (interface{}, error)
-	}
+const (
+	defaultIdentityKey = "jwt:%s:identity:%s"
 )
-
-type Options struct {
-	// Define the token's issuer.
-	// Using example: frontend or backend.
-	Issuer string
-
-	// Define the token's expired time.
-	// The default is 3600s.
-	ExpiredTime int
-
-	// Define the token's refresh time, Can't refreshed after the refresh time.
-	// When the refresh time is not set, the default value is half of expired time.
-	RefreshTime int
-
-	// Define the token seek locations within requests.
-	// Support header, form, cookie and query parameter.
-	// Support to seek multiple locations, Separate multiple seek locations with commas.
-	Locations string
-
-	// Define the signing method for generate token.
-	// Support multiple signing method such as HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384 and ES512
-	SignMethod string
-
-	// Define the secret cacheKey of HMAC.
-	// Only support secret value.
-	// The secret cacheKey is required, when the signing method is one of HS256, HS384 or HS512.
-	SecretKey string
-
-	// Define the public cacheKey of RSA or ECDSA.
-	// Support file path or value.
-	// The public cacheKey is required, when the signing method is one of RS256, RS384, RS512, ES256, ES384 and ES512.
-	PublicKey string
-
-	// Define the private cacheKey of RSA or ECDSA.
-	// Support file path or value.
-	// The private cacheKey is required, when the signing method is one of RS256, RS384, RS512, ES256, ES384 and ES512.
-	PrivateKey string
-
-	// Define the identity cacheKey of the claims.
-	// After opening the identification identifier and cache interface, the system will
-	// construct a unique authorization identifier for each token. If the same user is
-	// authorized to log in elsewhere, the previous token will no longer be valid.
-	IdentityKey string
-}
-
-type jwt struct {
-	issuer          string
-	signMethod      string
-	expiredTime     time.Duration
-	refreshTime     time.Duration
-	tokenCtxKey     string
-	tokenSeeks      [][2]string
-	rsaPublicKey    *rsa.PublicKey
-	rsaPrivateKey   *rsa.PrivateKey
-	ecdsaPublicKey  *ecdsa.PublicKey
-	ecdsaPrivateKey *ecdsa.PrivateKey
-	secretKey       []byte
-	ctx             context.Context
-	identityKey     string
-	adapter         Adapter
-}
-
-type Token struct {
-	Token     string    `json:"token"`
-	ExpiredAt time.Time `json:"expired_at"`
-	RefreshAt time.Time `json:"refresh_at"`
-}
 
 const (
 	jwtAudience    = "aud"
@@ -143,100 +27,46 @@ const (
 	noDetailReason = "no detail reason"
 )
 
-const (
-	HS256 = "HS256"
-	HS512 = "HS512"
-	HS384 = "HS384"
-	RS256 = "RS256"
-	RS384 = "RS384"
-	RS512 = "RS512"
-	ES256 = "ES256"
-	ES384 = "ES384"
-	ES512 = "ES512"
+type Payload map[string]interface{}
 
-	tokenSeekFromHeader  = "header"
-	tokenSeekFromQuery   = "query"
-	tokenSeekFromCookie  = "cookie"
-	tokenSeekFromForm    = "form"
-	tokenSeekFieldHeader = "Authorization"
-	authorizationBearer  = "Bearer"
-
-	defaultSignMethod     = HS256
-	defaultExpirationTime = time.Hour
-	defaultPayloadCtxKey  = "JWT_PAYLOAD"
-	defaultTokenCtxKey    = "JWT_TOKEN"
-	defaultIdentityKey    = "jwt:%s:identity:%s"
-)
-
-func NewJwt(opt *Options) (JWT, error) {
-	j := new(jwt)
-
-	if err := j.init(opt); err != nil {
-		return nil, err
-	}
-
-	return j, nil
+type Token struct {
+	Token     string    `json:"token"`
+	ExpiredAt time.Time `json:"expired_at"`
+	RefreshAt time.Time `json:"refresh_at"`
 }
 
-func (j *jwt) init(opt *Options) (err error) {
-	j.setIssuer(opt.Issuer)
-	j.setLocations(opt.Locations)
-	j.setExpiredTime(opt.ExpiredTime)
-	j.setRefreshTime(opt.RefreshTime)
-	j.setIdentityKey(opt.IdentityKey)
-
-	if err = j.setSigningMethod(opt.SignMethod); err != nil {
-		return
-	}
-
-	if j.isHMAC() {
-		if err = j.setSecretKey(opt.SecretKey); err != nil {
-			return
-		}
-	} else {
-		if err = j.setPublicKey(opt.PublicKey); err != nil {
-			return
-		}
-
-		if err = j.setPrivateKey(opt.PrivateKey); err != nil {
-			return
-		}
-	}
-
-	return
+type JWT struct {
+	opts       *options
+	err        error
+	secretKey  []byte
+	publicKey  interface{}
+	privateKey interface{}
+	once       sync.Once
+	http       *Http
 }
 
-// Ctx Which shallowly clones current object and sets the context for next operation.
-func (j *jwt) Ctx(ctx context.Context) JWT {
-	newJwt := j.clone()
-	newJwt.ctx = ctx
-	return newJwt
-}
+func NewJWT(opts ...Option) *JWT {
+	j := &JWT{opts: defaultOptions()}
+	for _, opt := range opts {
+		opt(j.opts)
+	}
+	j.init()
 
-// SetAdapter Set a cache adapter for authentication.
-func (j *jwt) SetAdapter(adapter Adapter) JWT {
-	j.adapter = adapter
 	return j
 }
 
-// Middleware Implemented basic JWT permission authentication.
-func (j *jwt) Middleware(r *http.Request) (*http.Request, error) {
-	payload, token, err := j.parseRequest(r)
-	if err != nil {
-		return nil, err
-	}
-
-	ctx := r.Context()
-	ctx = context.WithValue(ctx, defaultPayloadCtxKey, payload)
-	ctx = context.WithValue(ctx, defaultTokenCtxKey, token)
-
-	return r.WithContext(ctx), nil
+// Http Create a http jwt component
+func (j *JWT) Http() *Http {
+	j.once.Do(func() {
+		j.http = NewHttp(j)
+	})
+	return j.http
 }
 
 // GenerateToken Generates and returns a new token object with payload.
-func (j *jwt) GenerateToken(payload Payload) (*Token, error) {
-	if j.identityKey != "" {
-		if _, ok := payload[j.identityKey]; !ok {
+func (j *JWT) GenerateToken(payload Payload) (*Token, error) {
+	if j.opts.identityKey != "" {
+		if _, ok := payload[j.opts.identityKey]; !ok {
 			return nil, errMissingIdentity
 		}
 	}
@@ -244,13 +74,13 @@ func (j *jwt) GenerateToken(payload Payload) (*Token, error) {
 	var (
 		claims    = make(jwts.MapClaims)
 		now       = time.Now()
-		expiredAt = now.Add(j.expiredTime)
-		refreshAt = now.Add(j.refreshTime)
+		expiredAt = now.Add(j.opts.validDuration)
+		refreshAt = now.Add(j.opts.refreshDuration)
 		id        = strconv.FormatInt(now.UnixNano(), 10)
 	)
 
 	claims[jwtId] = id
-	claims[jwtIssuer] = j.issuer
+	claims[jwtIssuer] = j.opts.issuer
 	claims[jwtIssueAt] = now.Unix()
 	claims[jwtExpired] = expiredAt.Unix()
 	for k, v := range payload {
@@ -267,8 +97,8 @@ func (j *jwt) GenerateToken(payload Payload) (*Token, error) {
 		return nil, err
 	}
 
-	if j.identityKey != "" {
-		if err = j.saveIdentity(payload[j.identityKey], id); err != nil {
+	if j.opts.identityKey != "" {
+		if err = j.saveIdentity(payload[j.opts.identityKey], id); err != nil {
 			return nil, err
 		}
 	}
@@ -280,15 +110,10 @@ func (j *jwt) GenerateToken(payload Payload) (*Token, error) {
 	}, nil
 }
 
-// RefreshToken Generates and returns a new token object from.
-func (j *jwt) RefreshToken(r *http.Request) (*Token, error) {
-	return j.RetreadToken(j.seekToken(r), true)
-}
-
-// RetreadToken Retreads and returns a new token object depend on old token.
-// By default, the token expired error doesn't ignored.
+// RefreshToken Retreads and returns a new token object depend on old token.
+// By default, the token expired error doesn't be ignored.
 // You can ignore expired error by setting the `ignoreExpired` parameter.
-func (j *jwt) RetreadToken(token string, ignoreExpired ...bool) (*Token, error) {
+func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) {
 	if token == "" {
 		return nil, errMissingToken
 	}
@@ -305,7 +130,7 @@ func (j *jwt) RetreadToken(token string, ignoreExpired ...bool) (*Token, error) 
 		return nil, err
 	}
 
-	if (int64(claims[jwtIssueAt].(float64)) + int64(j.refreshTime/time.Second)) < now.Unix() {
+	if (int64(claims[jwtIssueAt].(float64)) + int64(j.opts.refreshDuration/time.Second)) < now.Unix() {
 		return nil, errExpiredToken
 	}
 
@@ -314,11 +139,12 @@ func (j *jwt) RetreadToken(token string, ignoreExpired ...bool) (*Token, error) 
 		newClaims[k] = v
 	}
 
-	expiredAt := now.Add(j.expiredTime)
-	refreshAt := now.Add(j.refreshTime)
+	expiredAt := now.Add(j.opts.validDuration)
+	refreshAt := now.Add(j.opts.refreshDuration)
 
 	newClaims[jwtIssueAt] = now.Unix()
 	newClaims[jwtExpired] = expiredAt.Unix()
+	newClaims[jwtId] = strconv.FormatInt(now.UnixNano(), 10)
 
 	token, err = j.signToken(newClaims)
 	if err != nil {
@@ -327,132 +153,66 @@ func (j *jwt) RetreadToken(token string, ignoreExpired ...bool) (*Token, error) 
 
 	object := &Token{Token: token, ExpiredAt: expiredAt, RefreshAt: refreshAt}
 
-	if j.identityKey == "" {
+	if j.opts.identityKey == "" {
 		return object, nil
 	}
 
-	if _, ok := claims[j.identityKey]; !ok {
+	if _, ok := claims[j.opts.identityKey]; !ok {
 		return nil, errMissingIdentity
 	}
 
-	if err = j.verifyIdentity(claims[j.identityKey], claims[jwtId], false); err != nil {
+	if err = j.verifyIdentity(claims, false); err != nil {
 		return nil, err
 	}
 
-	if err = j.saveIdentity(claims[j.identityKey], claims[jwtId]); err != nil {
+	if err = j.saveIdentity(newClaims[j.opts.identityKey], newClaims[jwtId]); err != nil {
 		return nil, err
 	}
 
 	return object, nil
 }
 
-// DestroyToken Destroy the cache of a token.
-func (j *jwt) DestroyToken(r *http.Request) error {
-	if j.identityKey == "" {
+// DestroyToken Destroy a token.
+func (j *JWT) DestroyToken(token string) error {
+	if j.opts.identityKey == "" {
 		return nil
 	}
 
-	claims, err := j.parseToken(j.seekToken(r), true)
+	if j.opts.store == nil {
+		return nil
+	}
+
+	claims, err := j.parseToken(token, true)
 	if err != nil {
 		return err
 	}
 
-	if _, ok := claims[j.identityKey]; !ok {
+	identity, ok := claims[j.opts.identityKey]
+	if !ok {
 		return errMissingIdentity
 	}
 
-	if err = j.verifyIdentity(claims[j.identityKey], claims[jwtId], true); err != nil {
+	if err = j.verifyIdentity(claims, true); err != nil {
 		return err
 	}
 
-	return j.removeIdentity(claims[j.identityKey])
-}
-
-// DestroyIdentity Destroy the identification mark.
-func (j *jwt) DestroyIdentity(identity interface{}) error {
 	return j.removeIdentity(identity)
 }
 
-// GetToken Retrieve token from request.
-// By default, the token expired error doesn't ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
-func (j *jwt) GetToken(r *http.Request, ignoreExpired ...bool) (*Token, error) {
-	var token string
-
-	if v := r.Context().Value(defaultTokenCtxKey); v != nil {
-		token = v.(string)
-	} else if token = j.seekToken(r); token == "" {
-		return nil, errMissingToken
-	}
-
+// ExtractPayload Extracts and returns payload from the token.
+// By default, The token expiration errors will not be ignored.
+// The payload is nil when the token expiration errors not be ignored.
+func (j *JWT) ExtractPayload(token string, ignoreExpired ...bool) (Payload, error) {
 	claims, err := j.parseToken(token, ignoreExpired...)
 	if err != nil {
 		return nil, err
 	}
 
-	expiredAt := time.Unix(int64(claims[jwtExpired].(float64)), 0)
-	refreshAt := time.Unix(int64(claims[jwtIssueAt].(float64)), 0).Add(j.refreshTime)
-
-	return &Token{
-		Token:     token,
-		ExpiredAt: expiredAt,
-		RefreshAt: refreshAt,
-	}, nil
-}
-
-// GetPayload Retrieve payload from request.
-// By default, the token expired error doesn't ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
-func (j *jwt) GetPayload(r *http.Request, ignoreExpired ...bool) (payload Payload, err error) {
-	if v := r.Context().Value(defaultPayloadCtxKey); v != nil {
-		payload = v.(Payload)
-	} else {
-		payload, _, err = j.parseRequest(r, ignoreExpired...)
-	}
-
-	return
-}
-
-// GetIdentity Retrieve identity from request.
-// By default, the token expired error doesn't ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
-func (j *jwt) GetIdentity(r *http.Request, ignoreExpired ...bool) (interface{}, error) {
-	if j.identityKey == "" {
-		return nil, errMissingIdentity
-	}
-
-	payload, err := j.GetPayload(r, ignoreExpired...)
-	if err != nil {
+	if err = j.verifyIdentity(claims, false); err != nil {
 		return nil, err
 	}
 
-	identity, ok := payload[j.identityKey]
-	if !ok {
-		return nil, errMissingIdentity
-	}
-
-	return identity, nil
-}
-
-// Parses and returns the payload and token from requests.
-func (j *jwt) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Payload, token string, err error) {
-	if token = j.seekToken(r); token == "" {
-		err = errMissingToken
-		return
-	}
-
-	claims, err := j.parseToken(token, ignoreExpired...)
-	if err != nil {
-		return
-	}
-
-	if j.identityKey != "" {
-		if err = j.verifyIdentity(claims[j.identityKey], claims[jwtId], false); err != nil {
-			return
-		}
-	}
-
-	payload = make(Payload)
+	payload := make(Payload)
 	for k, v := range claims {
 		switch k {
 		case jwtAudience, jwtExpired, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
@@ -462,79 +222,85 @@ func (j *jwt) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Payl
 		}
 	}
 
+	return payload, nil
+}
+
+// ExtractIdentity Retrieve identity from token.
+// By default, the token expired error doesn't be ignored.
+// You can ignore expired error by setting the `ignoreExpired` parameter.
+func (j *JWT) ExtractIdentity(token string, ignoreExpired ...bool) (interface{}, error) {
+	if j.opts.identityKey == "" {
+		return nil, errMissingIdentity
+	}
+
+	payload, err := j.ExtractPayload(token, ignoreExpired...)
+	if err != nil {
+		return nil, err
+	}
+
+	identity, ok := payload[j.opts.identityKey]
+	if !ok {
+		return nil, errMissingIdentity
+	}
+
+	return identity, nil
+}
+
+// DestroyIdentity Destroy the identification mark.
+func (j *JWT) DestroyIdentity(identity interface{}) error {
+	return j.removeIdentity(identity)
+}
+
+// IdentityKey Retrieve identity key.
+func (j *JWT) IdentityKey() string {
+	return j.opts.identityKey
+}
+
+// Signings and returns a token depend on the claims.
+func (j *JWT) signToken(claims jwts.MapClaims) (token string, err error) {
+	if j.err != nil {
+		err = j.err
+		return
+	}
+
+	jt := jwts.New(jwts.GetSigningMethod(string(j.opts.signAlgorithm)))
+	jt.Claims = claims
+
+	switch j.opts.signAlgorithm {
+	case HS256, HS384, HS512:
+		token, err = jt.SignedString(j.secretKey)
+	case RS256, RS384, RS512:
+		token, err = jt.SignedString(j.privateKey)
+	case ES256, ES384, ES512:
+		token, err = jt.SignedString(j.privateKey)
+	default:
+		err = errInvalidSignAlgorithm
+	}
 	return
 }
 
-// Seeks and returns token from request.
-// 1.from header    Authorization: Bearer ${token}
-// 2.from query     ${url}?${cacheKey}=${token}
-// 3.from cookie    Cookie: ${cacheKey}=${token}
-// 4.from form      ${cacheKey}=${token}
-func (j *jwt) seekToken(r *http.Request) (token string) {
-	for _, item := range j.tokenSeeks {
-		if len(token) > 0 {
-			break
-		}
-		switch item[0] {
-		case tokenSeekFromHeader:
-			token = j.seekTokenFromHeader(r, item[1])
-		case tokenSeekFromQuery:
-			token = j.seekTokenFromQuery(r, item[1])
-		case tokenSeekFromCookie:
-			token = j.seekTokenFromCookie(r, item[1])
-		case tokenSeekFromForm:
-			token = j.seekTokenFromForm(r, item[1])
-		}
+// Parses and returns payload from the token.
+func (j *JWT) parseToken(token string, ignoreExpired ...bool) (jwts.MapClaims, error) {
+	if j.err != nil {
+		return nil, j.err
 	}
 
-	return
-}
-
-// Seeks and returns JWT token from the headers of request.
-func (j *jwt) seekTokenFromHeader(r *http.Request, key string) string {
-	parts := strings.SplitN(r.Header.Get(key), " ", 2)
-	if len(parts) != 2 || parts[0] != authorizationBearer {
-		return ""
+	if token == "" {
+		return nil, errMissingToken
 	}
 
-	return parts[1]
-}
-
-// Seeks and returns JWT token from the query params of request.
-func (j *jwt) seekTokenFromQuery(r *http.Request, key string) string {
-	return r.URL.Query().Get(key)
-}
-
-// Seeks and returns JWT token from the cookies of request.
-func (j *jwt) seekTokenFromCookie(r *http.Request, key string) string {
-	cookie, _ := r.Cookie(key)
-	return cookie.String()
-}
-
-// Seeks and returns JWT token from the post forms of request.
-func (j *jwt) seekTokenFromForm(r *http.Request, key string) string {
-	return r.Form.Get(key)
-}
-
-// Parses and returns a claims map from the token.
-// By default, The token expiration errors will not be ignored.
-// The claims is nil when the token expiration errors not be ignored.
-func (j *jwt) parseToken(token string, ignoreExpired ...bool) (jwts.MapClaims, error) {
 	jt, err := jwts.Parse(token, func(t *jwts.Token) (key interface{}, err error) {
-		if jwts.GetSigningMethod(j.signMethod) != t.Method {
-			err = errSigningMethodNotMatch
+		if jwts.GetSigningMethod(string(j.opts.signAlgorithm)) != t.Method {
+			err = errSignAlgorithmNotMatch
 			return
 		}
 
-		switch {
-		case j.isHMAC():
+		switch j.opts.signAlgorithm {
+		case HS256, HS384, HS512:
 			key = j.secretKey
-		case j.isRSA():
-			key = j.rsaPublicKey
-		case j.isECDSA():
-			key = j.ecdsaPublicKey
+		default:
+			key = j.publicKey
 		}
-
 		return
 	})
 	if err != nil {
@@ -576,266 +342,44 @@ func (j *jwt) parseToken(token string, ignoreExpired ...bool) (jwts.MapClaims, e
 	return claims, nil
 }
 
-// Signings and returns a token depend on the claims.
-func (j *jwt) signToken(claims jwts.MapClaims) (token string, err error) {
-	jt := jwts.New(jwts.GetSigningMethod(j.signMethod))
-	jt.Claims = claims
-
-	switch {
-	case j.isHMAC():
-		token, err = jt.SignedString(j.secretKey)
-	case j.isRSA():
-		token, err = jt.SignedString(j.rsaPrivateKey)
-	case j.isECDSA():
-		token, err = jt.SignedString(j.ecdsaPrivateKey)
-	}
-	if err != nil {
-		return
-	}
-
-	return
-}
-
-// Check whether the signing method is HMAC.
-func (j *jwt) isHMAC() bool {
-	switch j.signMethod {
-	case HS256, HS384, HS512:
-		return true
-	}
-	return false
-}
-
-// Check whether the signing method is RSA.
-func (j *jwt) isRSA() bool {
-	switch j.signMethod {
-	case RS256, RS384, RS512:
-		return true
-	}
-	return false
-}
-
-// Check whether the signing method is ECDSA.
-func (j *jwt) isECDSA() bool {
-	switch j.signMethod {
-	case RS256, RS384, RS512:
-		return true
-	}
-	return false
-}
-
-// Set signing method.
-// Support multiple signing method such as HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384 and ES512
-func (j *jwt) setSigningMethod(signingMethod string) error {
-	switch signingMethod {
-	case HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384, ES512:
-		j.signMethod = signingMethod
-	case "":
-		j.signMethod = defaultSignMethod
-	default:
-		return errInvalidSigningMethod
-	}
-
-	return nil
-}
-
-// SetTokenLookup Set the token search location.
-func (j *jwt) setLocations(tokenLookup string) {
-	j.tokenSeeks = make([][2]string, 0)
-
-	for _, method := range strings.Split(tokenLookup, ",") {
-		parts := strings.Split(strings.TrimSpace(method), ":")
-		k := strings.TrimSpace(parts[0])
-		v := strings.TrimSpace(parts[1])
-		switch k {
-		case tokenSeekFromHeader, tokenSeekFromQuery, tokenSeekFromCookie, tokenSeekFromForm:
-			j.tokenSeeks = append(j.tokenSeeks, [2]string{k, v})
-		}
-	}
-
-	if len(j.tokenSeeks) == 0 {
-		j.tokenSeeks = append(j.tokenSeeks, [2]string{tokenSeekFromHeader, tokenSeekFieldHeader})
-	}
-}
-
-// Set the issuer of the token.
-func (j *jwt) setIssuer(issuer string) {
-	j.issuer = issuer
-}
-
-// Set the identity of the token.
-// After opening the identification identifier and cache interface, the system will
-// construct a unique authorization identifier for each token. If the same user is
-// authorized to log in elsewhere, the previous token will no longer be valid.
-func (j *jwt) setIdentityKey(identityKey string) {
-	j.identityKey = identityKey
-}
-
-// Set expiration time.
-// If only set the expiration time,
-// The refresh time will automatically be set to half of the expiration time.
-func (j *jwt) setExpiredTime(expirationTime int) {
-	if expirationTime > 0 {
-		j.expiredTime = time.Duration(expirationTime) * time.Second
-	} else {
-		j.expiredTime = defaultExpirationTime
-	}
-}
-
-// Set refresh time.
-// If only set the expiration time,
-// The refresh time will automatically be set to half of the expiration time.
-func (j *jwt) setRefreshTime(refreshTime int) {
-	if refreshTime > 0 {
-		j.refreshTime = time.Duration(refreshTime) * time.Second
-	} else {
-		j.refreshTime = j.expiredTime / 2
-	}
-}
-
-// Set secret cacheKey.
-func (j *jwt) setSecretKey(secretKey string) (err error) {
-	if secretKey == "" {
-		return errInvalidSecretKey
-	}
-
-	j.secretKey = conv.StringToBytes(secretKey)
-
-	return
-}
-
-// Set public cacheKey.
-// Allow setting of public cacheKey file or public cacheKey.
-func (j *jwt) setPublicKey(publicKey string) (err error) {
-	if publicKey == "" {
-		return errInvalidPublicKey
-	}
-
-	var (
-		fileInfo os.FileInfo
-		key      []byte
-	)
-
-	if fileInfo, err = os.Stat(publicKey); err != nil {
-		key = conv.StringToBytes(publicKey)
-	} else {
-		if fileInfo.Size() == 0 {
-			return errInvalidPublicKey
-		}
-
-		if key, err = ioutil.ReadFile(publicKey); err != nil {
-			return
-		}
-	}
-
-	if j.isRSA() {
-		if j.rsaPublicKey, err = jwts.ParseRSAPublicKeyFromPEM(key); err != nil {
-			return
-		}
-	}
-
-	if j.isECDSA() {
-		if j.ecdsaPublicKey, err = jwts.ParseECPublicKeyFromPEM(key); err != nil {
-			return
-		}
-	}
-
-	return
-}
-
-// Set private cacheKey.
-// Allow setting of private cacheKey file or private cacheKey.
-func (j *jwt) setPrivateKey(privateKey string) (err error) {
-	if privateKey == "" {
-		return errInvalidPrivateKey
-	}
-
-	var (
-		fileInfo os.FileInfo
-		key      []byte
-	)
-
-	if fileInfo, err = os.Stat(privateKey); err != nil {
-		key = conv.StringToBytes(privateKey)
-	} else {
-		if fileInfo.Size() == 0 {
-			return errInvalidPrivateKey
-		}
-
-		if key, err = ioutil.ReadFile(privateKey); err != nil {
-			return
-		}
-	}
-
-	if j.isRSA() {
-		if j.rsaPrivateKey, err = jwts.ParseRSAPrivateKeyFromPEM(key); err != nil {
-			return
-		}
-	}
-
-	if j.isECDSA() {
-		if j.ecdsaPrivateKey, err = jwts.ParseECPrivateKeyFromPEM(key); err != nil {
-			return
-		}
-	}
-
-	return
-}
-
-// returns context object
-func (j *jwt) getCtx() context.Context {
-	if j.ctx == nil {
-		return context.Background()
-	}
-	return j.ctx
-}
-
-// returns a shallow copy of current object.
-func (j *jwt) clone() *jwt {
-	return &jwt{
-		issuer:          j.issuer,
-		signMethod:      j.signMethod,
-		expiredTime:     j.expiredTime,
-		refreshTime:     j.refreshTime,
-		tokenCtxKey:     j.tokenCtxKey,
-		tokenSeeks:      j.tokenSeeks,
-		rsaPublicKey:    j.rsaPublicKey,
-		rsaPrivateKey:   j.rsaPrivateKey,
-		ecdsaPublicKey:  j.ecdsaPublicKey,
-		ecdsaPrivateKey: j.ecdsaPrivateKey,
-		secretKey:       j.secretKey,
-		adapter:         j.adapter,
-		identityKey:     j.identityKey,
-		ctx:             j.ctx,
-	}
-}
-
-// build a cache key by identity.
-func (j *jwt) cacheKey(identity interface{}) string {
-	return fmt.Sprintf(defaultIdentityKey, j.issuer, conv.String(identity))
-}
-
 // save identification mark.
-func (j *jwt) saveIdentity(identity, jid interface{}) error {
-	if j.adapter == nil {
+func (j *JWT) saveIdentity(identity, jid interface{}) error {
+	if j.opts.identityKey == "" {
 		return nil
 	}
 
-	return j.adapter.Set(j.getCtx(), j.cacheKey(identity), conv.String(jid), time.Duration(math.Max(float64(j.expiredTime), float64(j.refreshTime))))
+	if j.opts.store == nil {
+		return nil
+	}
+
+	key := fmt.Sprintf(defaultIdentityKey, j.opts.identityKey, conv.String(identity))
+	duration := time.Duration(math.Max(float64(j.opts.validDuration), float64(j.opts.refreshDuration)))
+
+	return j.opts.store.Set(j.opts.ctx, key, conv.String(jid), duration)
 }
 
 // verify identification mark.
-func (j *jwt) verifyIdentity(identity, jid interface{}, ignoreMissed bool) error {
-	if j.adapter == nil {
+func (j *JWT) verifyIdentity(claims jwts.MapClaims, ignoreMissed bool) error {
+	if j.opts.identityKey == "" {
 		return nil
 	}
 
-	v, err := j.adapter.Get(j.getCtx(), j.cacheKey(identity))
+	if j.opts.store == nil {
+		return nil
+	}
+
+	var (
+		jid      = claims[jwtId]
+		identity = claims[j.opts.identityKey]
+		key      = fmt.Sprintf(defaultIdentityKey, j.opts.identityKey, conv.String(identity))
+	)
+
+	v, err := j.opts.store.Get(j.opts.ctx, key)
 	if err != nil {
 		return err
 	}
 
 	oldJid := conv.String(v)
-
 	if oldJid == "" {
 		if ignoreMissed {
 			return nil
@@ -852,14 +396,94 @@ func (j *jwt) verifyIdentity(identity, jid interface{}, ignoreMissed bool) error
 }
 
 // remove identification mark.
-func (j *jwt) removeIdentity(identity interface{}) error {
-	if j.adapter == nil {
+func (j *JWT) removeIdentity(identity interface{}) error {
+	if j.opts.identityKey == "" {
 		return nil
 	}
 
-	if _, err := j.adapter.Remove(j.getCtx(), j.cacheKey(identity)); err != nil {
-		return err
+	if j.opts.store == nil {
+		return nil
 	}
 
-	return nil
+	key := fmt.Sprintf(defaultIdentityKey, j.opts.identityKey, conv.String(identity))
+
+	_, err := j.opts.store.Remove(j.opts.ctx, key)
+	return err
+}
+
+func (j *JWT) init() {
+	switch j.opts.signAlgorithm {
+	case HS256, HS384, HS512:
+		if j.opts.secretKey == "" {
+			j.err = errInvalidSecretKey
+		} else {
+			j.secretKey = []byte(j.opts.secretKey)
+		}
+	case RS256, RS384, RS512, ES256, ES384, ES512:
+		pub, err := loadKey(j.opts.publicKey)
+		if err != nil {
+			j.err = err
+			return
+		}
+
+		if len(pub) == 0 {
+			j.err = errInvalidPublicKey
+			return
+		}
+
+		prv, err := loadKey(j.opts.privateKey)
+		if err != nil {
+			j.err = err
+			return
+		}
+
+		if len(prv) == 0 {
+			j.err = errInvalidPrivateKey
+			return
+		}
+
+		switch j.opts.signAlgorithm {
+		case RS256, RS384, RS512:
+			if pubKey, err := jwts.ParseRSAPublicKeyFromPEM(pub); err != nil {
+				j.err = err
+				return
+			} else {
+				j.publicKey = pubKey
+			}
+
+			if prvKey, err := jwts.ParseRSAPrivateKeyFromPEM(prv); err != nil {
+				j.err = err
+				return
+			} else {
+				j.privateKey = prvKey
+			}
+		case ES256, ES384, ES512:
+			if pubKey, err := jwts.ParseECPublicKeyFromPEM(pub); err != nil {
+				j.err = err
+				return
+			} else {
+				j.publicKey = pubKey
+			}
+
+			if prvKey, err := jwts.ParseECPrivateKeyFromPEM(prv); err != nil {
+				j.err = err
+				return
+			} else {
+				j.privateKey = prvKey
+			}
+		}
+	default:
+		j.err = errInvalidSignAlgorithm
+	}
+}
+
+func loadKey(key string) ([]byte, error) {
+	if fileInfo, err := os.Stat(key); err != nil {
+		return []byte(key), nil
+	} else {
+		if fileInfo.Size() == 0 {
+			return nil, nil
+		}
+		return ioutil.ReadFile(key)
+	}
 }
