@@ -31,7 +31,7 @@ func init() {
 		Db:   1,
 	}, "jwt")
 
-	auth = jwt.NewJWT(
+	auth, _ = jwt.NewJWT(
 		jwt.WithIssuer("backend"),
 		jwt.WithSignAlgorithm(jwt.HS256),
 		jwt.WithSecretKey("secret"),

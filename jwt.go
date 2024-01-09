@@ -1,10 +1,10 @@
 package jwt
 
 import (
+	"errors"
 	"fmt"
-	jwts "github.com/dgrijalva/jwt-go"
 	"github.com/dobyte/jwt/internal/conv"
-	"io/ioutil"
+	"github.com/golang-jwt/jwt/v5"
 	"math"
 	"os"
 	"strconv"
@@ -36,23 +36,26 @@ type Token struct {
 }
 
 type JWT struct {
-	opts       *options
-	err        error
-	secretKey  []byte
-	publicKey  interface{}
-	privateKey interface{}
-	once       sync.Once
-	http       *Http
+	opts          *options
+	secretKey     []byte
+	publicKey     interface{}
+	privateKey    interface{}
+	signingMethod jwt.SigningMethod
+	once          sync.Once
+	http          *Http
 }
 
-func NewJWT(opts ...Option) *JWT {
+func NewJWT(opts ...Option) (*JWT, error) {
 	j := &JWT{opts: defaultOptions()}
 	for _, opt := range opts {
 		opt(j.opts)
 	}
-	j.init()
 
-	return j
+	if err := j.init(); err != nil {
+		return nil, err
+	}
+
+	return j, nil
 }
 
 // Http Create a http jwt component
@@ -72,7 +75,7 @@ func (j *JWT) GenerateToken(payload Payload) (*Token, error) {
 	}
 
 	var (
-		claims    = make(jwts.MapClaims)
+		claims    = make(jwt.MapClaims)
 		now       = time.Now()
 		expiredAt = now.Add(j.opts.validDuration)
 		refreshAt = now.Add(j.opts.refreshDuration)
@@ -120,8 +123,8 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 
 	var (
 		err       error
-		claims    jwts.MapClaims
-		newClaims jwts.MapClaims
+		claims    jwt.MapClaims
+		newClaims jwt.MapClaims
 		now       = time.Now()
 	)
 
@@ -134,7 +137,7 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 		return nil, errExpiredToken
 	}
 
-	newClaims = make(jwts.MapClaims)
+	newClaims = make(jwt.MapClaims)
 	for k, v := range claims {
 		newClaims[k] = v
 	}
@@ -257,75 +260,52 @@ func (j *JWT) IdentityKey() string {
 }
 
 // Signings and returns a token depend on the claims.
-func (j *JWT) signToken(claims jwts.MapClaims) (token string, err error) {
-	if j.err != nil {
-		err = j.err
-		return
-	}
-
-	jt := jwts.New(jwts.GetSigningMethod(string(j.opts.signAlgorithm)))
-	jt.Claims = claims
+func (j *JWT) signToken(claims jwt.MapClaims) (string, error) {
+	jt := jwt.NewWithClaims(j.signingMethod, claims)
 
 	switch j.opts.signAlgorithm {
 	case HS256, HS384, HS512:
-		token, err = jt.SignedString(j.secretKey)
-	case RS256, RS384, RS512:
-		token, err = jt.SignedString(j.privateKey)
-	case ES256, ES384, ES512:
-		token, err = jt.SignedString(j.privateKey)
+		return jt.SignedString(j.secretKey)
 	default:
-		err = errInvalidSignAlgorithm
+		return jt.SignedString(j.privateKey)
 	}
-	return
 }
 
 // Parses and returns payload from the token.
-func (j *JWT) parseToken(token string, ignoreExpired ...bool) (jwts.MapClaims, error) {
-	if j.err != nil {
-		return nil, j.err
-	}
-
+func (j *JWT) parseToken(token string, ignoreExpired ...bool) (jwt.MapClaims, error) {
 	if token == "" {
 		return nil, errMissingToken
 	}
 
-	jt, err := jwts.Parse(token, func(t *jwts.Token) (key interface{}, err error) {
-		if jwts.GetSigningMethod(string(j.opts.signAlgorithm)) != t.Method {
-			err = errSignAlgorithmNotMatch
-			return
+	jt, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
+		if j.signingMethod != t.Method {
+			return nil, errSignAlgorithmNotMatch
 		}
 
 		switch j.opts.signAlgorithm {
 		case HS256, HS384, HS512:
-			key = j.secretKey
+			return j.secretKey, nil
 		default:
-			key = j.publicKey
+			return j.publicKey, nil
 		}
-		return
 	})
 	if err != nil {
-		switch e := err.(type) {
-		case *jwts.ValidationError:
-			switch e.Errors {
-			case jwts.ValidationErrorExpired:
-				if len(ignoreExpired) > 0 && ignoreExpired[0] {
-					// ignore token expired error
-				} else {
-					return nil, errExpiredToken
-				}
-			default:
-				return nil, errInvalidToken
+		if errors.Is(err, jwt.ErrTokenExpired) {
+			if len(ignoreExpired) > 0 && ignoreExpired[0] {
+				// ignore token expired error
+			} else {
+				return nil, errExpiredToken
 			}
-		default:
-			return nil, errInvalidToken
 		}
+
+		return nil, errInvalidToken
 	}
 
 	if jt == nil || !jt.Valid {
 		return nil, errInvalidToken
 	}
 
-	claims := jt.Claims.(jwts.MapClaims)
+	claims := jt.Claims.(jwt.MapClaims)
 
 	if _, ok := claims[jwtId]; !ok {
 		return nil, errInvalidToken
@@ -359,7 +339,7 @@ func (j *JWT) saveIdentity(identity, jid interface{}) error {
 }
 
 // verify identification mark.
-func (j *JWT) verifyIdentity(claims jwts.MapClaims, ignoreMissed bool) error {
+func (j *JWT) verifyIdentity(claims jwt.MapClaims, ignoreMissed bool) error {
 	if j.opts.identityKey == "" {
 		return nil
 	}
@@ -411,70 +391,66 @@ func (j *JWT) removeIdentity(identity interface{}) error {
 	return err
 }
 
-func (j *JWT) init() {
+func (j *JWT) init() error {
 	switch j.opts.signAlgorithm {
 	case HS256, HS384, HS512:
 		if j.opts.secretKey == "" {
-			j.err = errInvalidSecretKey
+			return errInvalidSecretKey
 		} else {
 			j.secretKey = []byte(j.opts.secretKey)
 		}
 	case RS256, RS384, RS512, ES256, ES384, ES512:
 		pub, err := loadKey(j.opts.publicKey)
 		if err != nil {
-			j.err = err
-			return
+			return err
 		}
 
 		if len(pub) == 0 {
-			j.err = errInvalidPublicKey
-			return
+			return errInvalidPublicKey
 		}
 
 		prv, err := loadKey(j.opts.privateKey)
 		if err != nil {
-			j.err = err
-			return
+			return err
 		}
 
 		if len(prv) == 0 {
-			j.err = errInvalidPrivateKey
-			return
+			return errInvalidPrivateKey
 		}
 
 		switch j.opts.signAlgorithm {
 		case RS256, RS384, RS512:
-			if pubKey, err := jwts.ParseRSAPublicKeyFromPEM(pub); err != nil {
-				j.err = err
-				return
+			if pubKey, err := jwt.ParseRSAPublicKeyFromPEM(pub); err != nil {
+				return err
 			} else {
 				j.publicKey = pubKey
 			}
 
-			if prvKey, err := jwts.ParseRSAPrivateKeyFromPEM(prv); err != nil {
-				j.err = err
-				return
+			if prvKey, err := jwt.ParseRSAPrivateKeyFromPEM(prv); err != nil {
+				return err
 			} else {
 				j.privateKey = prvKey
 			}
 		case ES256, ES384, ES512:
-			if pubKey, err := jwts.ParseECPublicKeyFromPEM(pub); err != nil {
-				j.err = err
-				return
+			if pubKey, err := jwt.ParseECPublicKeyFromPEM(pub); err != nil {
+				return err
 			} else {
 				j.publicKey = pubKey
 			}
 
-			if prvKey, err := jwts.ParseECPrivateKeyFromPEM(prv); err != nil {
-				j.err = err
-				return
+			if prvKey, err := jwt.ParseECPrivateKeyFromPEM(prv); err != nil {
+				return err
 			} else {
 				j.privateKey = prvKey
 			}
 		}
 	default:
-		j.err = errInvalidSignAlgorithm
+		return errInvalidSignAlgorithm
 	}
+
+	j.signingMethod = jwt.GetSigningMethod(j.opts.signAlgorithm.String())
+
+	return nil
 }
 
 func loadKey(key string) ([]byte, error) {
@@ -484,6 +460,6 @@ func loadKey(key string) ([]byte, error) {
 		if fileInfo.Size() == 0 {
 			return nil, nil
 		}
-		return ioutil.ReadFile(key)
+		return os.ReadFile(key)
 	}
 }

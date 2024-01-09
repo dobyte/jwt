@@ -9,6 +9,10 @@ type Option func(o *options)
 
 type SignAlgorithm string
 
+func (s SignAlgorithm) String() string {
+	return string(s)
+}
+
 const (
 	HS256 SignAlgorithm = "HS256"
 	HS512 SignAlgorithm = "HS512"

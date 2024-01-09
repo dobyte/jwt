@@ -22,7 +22,7 @@ import (
 )
 
 func main() {
-	auth := jwt.NewJWT(
+	auth, err := jwt.NewJWT(
 		jwt.WithIssuer("backend"),
 		jwt.WithSignAlgorithm(jwt.HS256),
 		jwt.WithSecretKey("secret"),
@@ -30,6 +30,9 @@ func main() {
 		jwt.WithLookupLocations("header:Authorization"),
 		jwt.WithIdentityKey("uid"),
 	)
+	if err != nil {
+		log.Fatal("create jwt instance failed:" + err.Error())
+    }
 
 	token, err := auth.GenerateToken(jwt.Payload{
 		"uid":     1,
