@@ -63,7 +63,7 @@ func (h *Http) RefreshToken(r *http.Request, ignoreExpired ...bool) (*Token, err
 func (h *Http) DestroyToken(r *http.Request) error {
 	token := h.lookupToken(r)
 	if token == "" {
-		return errMissingToken
+		return ErrMissingToken
 	}
 
 	return h.jwt.DestroyToken(token)
@@ -78,7 +78,7 @@ func (h *Http) ExtractToken(r *http.Request, ignoreExpired ...bool) (*Token, err
 	if v := r.Context().Value(defaultTokenCtxKey); v != nil {
 		token = v.(string)
 	} else if token = h.lookupToken(r); token == "" {
-		return nil, errMissingToken
+		return nil, ErrMissingToken
 	}
 
 	claims, err := h.jwt.parseToken(token, ignoreExpired...)
@@ -113,7 +113,7 @@ func (h *Http) ExtractPayload(r *http.Request, ignoreExpired ...bool) (payload P
 // You can ignore expired error by setting the `ignoreExpired` parameter.
 func (h *Http) ExtractIdentity(r *http.Request, ignoreExpired ...bool) (interface{}, error) {
 	if h.jwt.opts.identityKey == "" {
-		return nil, errMissingIdentity
+		return nil, ErrMissingIdentity
 	}
 
 	payload, err := h.ExtractPayload(r, ignoreExpired...)
@@ -123,7 +123,7 @@ func (h *Http) ExtractIdentity(r *http.Request, ignoreExpired ...bool) (interfac
 
 	identity, ok := payload[h.jwt.opts.identityKey]
 	if !ok {
-		return nil, errMissingIdentity
+		return nil, ErrMissingIdentity
 	}
 
 	return identity, nil
@@ -146,7 +146,7 @@ func (h *Http) Middleware(r *http.Request) (*http.Request, error) {
 // Parses and returns the payload and token from requests.
 func (h *Http) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Payload, token string, err error) {
 	if token = h.lookupToken(r); token == "" {
-		err = errMissingToken
+		err = ErrMissingToken
 		return
 	}
 

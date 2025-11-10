@@ -3,13 +3,14 @@ package jwt
 import (
 	"errors"
 	"fmt"
-	"github.com/dobyte/jwt/internal/conv"
-	"github.com/golang-jwt/jwt/v5"
 	"math"
 	"os"
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/dobyte/jwt/internal/conv"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 const (
@@ -70,7 +71,7 @@ func (j *JWT) Http() *Http {
 func (j *JWT) GenerateToken(payload Payload) (*Token, error) {
 	if j.opts.identityKey != "" {
 		if _, ok := payload[j.opts.identityKey]; !ok {
-			return nil, errMissingIdentity
+			return nil, ErrMissingIdentity
 		}
 	}
 
@@ -118,7 +119,7 @@ func (j *JWT) GenerateToken(payload Payload) (*Token, error) {
 // You can ignore expired error by setting the `ignoreExpired` parameter.
 func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) {
 	if token == "" {
-		return nil, errMissingToken
+		return nil, ErrMissingToken
 	}
 
 	var (
@@ -133,8 +134,10 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 		return nil, err
 	}
 
-	if (int64(claims[jwtIssueAt].(float64)) + int64(j.opts.refreshDuration/time.Second)) < now.Unix() {
-		return nil, errExpiredToken
+	if len(ignoreExpired) == 0 || !ignoreExpired[0] {
+		if (int64(claims[jwtIssueAt].(float64)) + int64(j.opts.refreshDuration/time.Second)) < now.Unix() {
+			return nil, ErrExpiredToken
+		}
 	}
 
 	newClaims = make(jwt.MapClaims)
@@ -161,7 +164,7 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 	}
 
 	if _, ok := claims[j.opts.identityKey]; !ok {
-		return nil, errMissingIdentity
+		return nil, ErrMissingIdentity
 	}
 
 	if err = j.verifyIdentity(claims, false); err != nil {
@@ -176,7 +179,7 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 }
 
 // DestroyToken Destroy a token.
-func (j *JWT) DestroyToken(token string) error {
+func (j *JWT) DestroyToken(token string, ignoreExpired ...bool) error {
 	if j.opts.identityKey == "" {
 		return nil
 	}
@@ -185,14 +188,14 @@ func (j *JWT) DestroyToken(token string) error {
 		return nil
 	}
 
-	claims, err := j.parseToken(token, true)
+	claims, err := j.parseToken(token, ignoreExpired...)
 	if err != nil {
 		return err
 	}
 
 	identity, ok := claims[j.opts.identityKey]
 	if !ok {
-		return errMissingIdentity
+		return ErrMissingIdentity
 	}
 
 	if err = j.verifyIdentity(claims, true); err != nil {
@@ -233,7 +236,7 @@ func (j *JWT) ExtractPayload(token string, ignoreExpired ...bool) (Payload, erro
 // You can ignore expired error by setting the `ignoreExpired` parameter.
 func (j *JWT) ExtractIdentity(token string, ignoreExpired ...bool) (interface{}, error) {
 	if j.opts.identityKey == "" {
-		return nil, errMissingIdentity
+		return nil, ErrMissingIdentity
 	}
 
 	payload, err := j.ExtractPayload(token, ignoreExpired...)
@@ -243,7 +246,7 @@ func (j *JWT) ExtractIdentity(token string, ignoreExpired ...bool) (interface{},
 
 	identity, ok := payload[j.opts.identityKey]
 	if !ok {
-		return nil, errMissingIdentity
+		return nil, ErrMissingIdentity
 	}
 
 	return identity, nil
@@ -274,12 +277,12 @@ func (j *JWT) signToken(claims jwt.MapClaims) (string, error) {
 // Parses and returns payload from the token.
 func (j *JWT) parseToken(token string, ignoreExpired ...bool) (jwt.MapClaims, error) {
 	if token == "" {
-		return nil, errMissingToken
+		return nil, ErrMissingToken
 	}
 
 	jt, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
 		if j.signingMethod != t.Method {
-			return nil, errSignAlgorithmNotMatch
+			return nil, ErrSignAlgorithmNotMatch
 		}
 
 		switch j.opts.signAlgorithm {
@@ -294,29 +297,29 @@ func (j *JWT) parseToken(token string, ignoreExpired ...bool) (jwt.MapClaims, er
 			if len(ignoreExpired) > 0 && ignoreExpired[0] {
 				// ignore token expired error
 			} else {
-				return nil, errExpiredToken
+				return nil, ErrExpiredToken
 			}
+		} else {
+			return nil, ErrInvalidToken
 		}
-
-		return nil, errInvalidToken
 	}
 
-	if jt == nil || !jt.Valid {
-		return nil, errInvalidToken
+	if jt == nil {
+		return nil, ErrInvalidToken
 	}
 
 	claims := jt.Claims.(jwt.MapClaims)
 
 	if _, ok := claims[jwtId]; !ok {
-		return nil, errInvalidToken
+		return nil, ErrInvalidToken
 	}
 
 	if _, ok := claims[jwtIssueAt]; !ok {
-		return nil, errInvalidToken
+		return nil, ErrInvalidToken
 	}
 
 	if _, ok := claims[jwtExpired]; !ok {
-		return nil, errInvalidToken
+		return nil, ErrInvalidToken
 	}
 
 	return claims, nil
@@ -364,12 +367,12 @@ func (j *JWT) verifyIdentity(claims jwt.MapClaims, ignoreMissed bool) error {
 		if ignoreMissed {
 			return nil
 		} else {
-			return errInvalidToken
+			return ErrInvalidToken
 		}
 	}
 
 	if conv.String(jid) != oldJid {
-		return errAuthElsewhere
+		return ErrAuthElsewhere
 	}
 
 	return nil
@@ -395,7 +398,7 @@ func (j *JWT) init() error {
 	switch j.opts.signAlgorithm {
 	case HS256, HS384, HS512:
 		if j.opts.secretKey == "" {
-			return errInvalidSecretKey
+			return ErrInvalidSecretKey
 		} else {
 			j.secretKey = []byte(j.opts.secretKey)
 		}
@@ -406,7 +409,7 @@ func (j *JWT) init() error {
 		}
 
 		if len(pub) == 0 {
-			return errInvalidPublicKey
+			return ErrInvalidPublicKey
 		}
 
 		prv, err := loadKey(j.opts.privateKey)
@@ -415,7 +418,7 @@ func (j *JWT) init() error {
 		}
 
 		if len(prv) == 0 {
-			return errInvalidPrivateKey
+			return ErrInvalidPrivateKey
 		}
 
 		switch j.opts.signAlgorithm {
@@ -445,7 +448,7 @@ func (j *JWT) init() error {
 			}
 		}
 	default:
-		return errInvalidSignAlgorithm
+		return ErrInvalidSignAlgorithm
 	}
 
 	j.signingMethod = jwt.GetSigningMethod(j.opts.signAlgorithm.String())
