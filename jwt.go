@@ -122,52 +122,36 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 		return nil, ErrMissingToken
 	}
 
-	var (
-		err       error
-		claims    jwt.MapClaims
-		newClaims jwt.MapClaims
-		now       = time.Now()
-	)
-
-	claims, err = j.parseToken(token, ignoreExpired...)
+	oldClaims, err := j.parseToken(token, ignoreExpired...)
 	if err != nil {
 		return nil, err
 	}
 
 	if len(ignoreExpired) == 0 || !ignoreExpired[0] {
-		if (int64(claims[jwtIssueAt].(float64)) + int64(j.opts.refreshDuration/time.Second)) < now.Unix() {
+		if (int64(oldClaims[jwtIssueAt].(float64)) + int64(j.opts.refreshDuration/time.Second)) < time.Now().Unix() {
 			return nil, ErrExpiredToken
 		}
 	}
 
-	newClaims = make(jwt.MapClaims)
-	for k, v := range claims {
-		newClaims[k] = v
+	if err = j.verifyIdentity(oldClaims, len(ignoreExpired) > 0 && ignoreExpired[0]); err != nil {
+		return nil, err
 	}
+
+	now := time.Now()
 
 	expiredAt := now.Add(j.opts.validDuration)
 	refreshAt := now.Add(j.opts.refreshDuration)
+
+	newClaims := make(jwt.MapClaims)
+	for k, v := range oldClaims {
+		newClaims[k] = v
+	}
 
 	newClaims[jwtIssueAt] = now.Unix()
 	newClaims[jwtExpired] = expiredAt.Unix()
 	newClaims[jwtId] = strconv.FormatInt(now.UnixNano(), 10)
 
-	token, err = j.signToken(newClaims)
-	if err != nil {
-		return nil, err
-	}
-
-	object := &Token{Token: token, ExpiredAt: expiredAt, RefreshAt: refreshAt}
-
-	if j.opts.identityKey == "" {
-		return object, nil
-	}
-
-	if _, ok := claims[j.opts.identityKey]; !ok {
-		return nil, ErrMissingIdentity
-	}
-
-	if err = j.verifyIdentity(claims, len(ignoreExpired) > 0 && ignoreExpired[0]); err != nil {
+	if token, err = j.signToken(newClaims); err != nil {
 		return nil, err
 	}
 
@@ -175,7 +159,11 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 		return nil, err
 	}
 
-	return object, nil
+	return &Token{
+		Token:     token,
+		ExpiredAt: expiredAt,
+		RefreshAt: refreshAt,
+	}, nil
 }
 
 // DestroyToken Destroy a token.
