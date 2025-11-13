@@ -167,7 +167,7 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 		return nil, ErrMissingIdentity
 	}
 
-	if err = j.verifyIdentity(claims, false); err != nil {
+	if err = j.verifyIdentity(claims, len(ignoreExpired) > 0 && ignoreExpired[0]); err != nil {
 		return nil, err
 	}
 
@@ -198,7 +198,7 @@ func (j *JWT) DestroyToken(token string, ignoreExpired ...bool) error {
 		return ErrMissingIdentity
 	}
 
-	if err = j.verifyIdentity(claims, true); err != nil {
+	if err = j.verifyIdentity(claims, len(ignoreExpired) > 0 && ignoreExpired[0]); err != nil {
 		return err
 	}
 
@@ -214,7 +214,7 @@ func (j *JWT) ExtractPayload(token string, ignoreExpired ...bool) (Payload, erro
 		return nil, err
 	}
 
-	if err = j.verifyIdentity(claims, false); err != nil {
+	if err = j.verifyIdentity(claims, len(ignoreExpired) > 0 && ignoreExpired[0]); err != nil {
 		return nil, err
 	}
 
@@ -347,31 +347,28 @@ func (j *JWT) verifyIdentity(claims jwt.MapClaims, ignoreMissed bool) error {
 		return nil
 	}
 
+	if _, ok := claims[j.opts.identityKey]; !ok {
+		return ErrMissingIdentity
+	}
+
 	if j.opts.store == nil {
 		return nil
 	}
 
-	var (
-		jid      = claims[jwtId]
-		identity = claims[j.opts.identityKey]
-		key      = fmt.Sprintf(defaultIdentityKey, j.opts.identityKey, conv.String(identity))
-	)
+	key := fmt.Sprintf(defaultIdentityKey, j.opts.identityKey, conv.String(claims[j.opts.identityKey]))
 
 	v, err := j.opts.store.Get(j.opts.ctx, key)
 	if err != nil {
 		return err
 	}
 
-	oldJid := conv.String(v)
-	if oldJid == "" {
+	if oldJid := conv.String(v); oldJid == "" {
 		if ignoreMissed {
 			return nil
 		} else {
 			return ErrInvalidToken
 		}
-	}
-
-	if conv.String(jid) != oldJid {
+	} else if conv.String(claims[jwtId]) != oldJid {
 		return ErrAuthElsewhere
 	}
 
