@@ -101,7 +101,7 @@ func (j *JWT) GenerateToken(subject string, payload ...Payload) (*Token, error) 
 
 // RefreshToken Retreads and returns a new token object depend on old token.
 // By default, the token expired error doesn't be ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
+// You can ignore expired error by setting the `isOmitExpired` parameter.
 func (j *JWT) RefreshToken(token string, isOmitExpired ...bool) (*Token, error) {
 	payload, err := j.ParseToken(token, isOmitExpired...)
 	if err != nil {
@@ -194,7 +194,7 @@ func (j *JWT) DestroyToken(token string, isOmitExpired ...bool) error {
 }
 
 // DestroyTokenBySubject Destroy all of the tokens with the subject.
-func (j *JWT) DestroyTokenBySubject(subject any) error {
+func (j *JWT) DestroyTokenBySubject(subject string) error {
 	return j.doRemoveSubject(subject)
 }
 
@@ -211,7 +211,7 @@ func (j *JWT) doSignToken(claims jwt.MapClaims) (string, error) {
 }
 
 // Parses and returns payload from the token.
-func (j *JWT) doParseToken(token string, ignoreExpired ...bool) (jwt.MapClaims, error) {
+func (j *JWT) doParseToken(token string, isOmitExpired ...bool) (jwt.MapClaims, error) {
 	if token == "" {
 		return nil, ErrMissingToken
 	}
@@ -230,7 +230,7 @@ func (j *JWT) doParseToken(token string, ignoreExpired ...bool) (jwt.MapClaims, 
 	})
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
-			if len(ignoreExpired) > 0 && ignoreExpired[0] {
+			if len(isOmitExpired) > 0 && isOmitExpired[0] {
 				// ignore token expired error
 			} else {
 				return nil, ErrExpiredToken
@@ -302,7 +302,7 @@ func (j *JWT) doVerifySubject(subject, uuid string, isOmitExpired bool) error {
 }
 
 // remove subject mark.
-func (j *JWT) doRemoveSubject(subject any) error {
+func (j *JWT) doRemoveSubject(subject string) error {
 	if j.opts.store == nil {
 		return nil
 	}

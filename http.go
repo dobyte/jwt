@@ -83,7 +83,7 @@ func (h *Http) ParseToken(r *http.Request, isOmitExpired ...bool) (payload Paylo
 
 // ExtractToken Extracts and returns a token object from request.
 // By default, the token expired error doesn't be ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
+// You can ignore expired error by setting the `isOmitExpired` parameter.
 func (h *Http) ExtractToken(r *http.Request, isOmitExpired ...bool) (*Token, error) {
 	var token string
 
