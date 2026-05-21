@@ -1,19 +1,19 @@
 package main
 
 import (
+	"net/http"
+
+	"github.com/dobyte/jwt"
 	"github.com/gogf/gcache-adapter/adapter"
 	"github.com/gogf/gf/database/gredis"
 	"github.com/gogf/gf/frame/g"
 	"github.com/gogf/gf/net/ghttp"
-	"net/http"
-
-	"github.com/dobyte/jwt"
 )
 
 type Response struct {
-	Status  int         `json:"status"`
-	Message string      `json:"message"`
-	Data    interface{} `json:"data"`
+	Status  int    `json:"status"`
+	Message string `json:"message"`
+	Data    any    `json:"data"`
 }
 
 var (
@@ -37,7 +37,6 @@ func init() {
 		jwt.WithSecretKey("secret"),
 		jwt.WithValidDuration(3600),
 		jwt.WithLookupLocations("header:Authorization"),
-		jwt.WithIdentityKey("uid"),
 		jwt.WithStore(adapter.NewRedis(g.Redis("jwt"))),
 	)
 }
@@ -49,7 +48,7 @@ func failed(r *ghttp.Request, status int, message string) {
 	})
 }
 
-func success(r *ghttp.Request, message string, data interface{}) {
+func success(r *ghttp.Request, message string, data any) {
 	_ = r.Response.WriteJsonExit(Response{
 		Status:  http.StatusOK,
 		Message: message,
@@ -85,7 +84,7 @@ func main() {
 	s.Group("", func(group *ghttp.RouterGroup) {
 		// login
 		group.POST("/login", func(r *ghttp.Request) {
-			token, err := auth.GenerateToken(payload)
+			token, err := auth.GenerateToken("1", payload)
 			if err != nil {
 				failed(r, http.StatusBadRequest, err.Error())
 			}
@@ -116,7 +115,7 @@ func main() {
 
 		// get user profile information
 		group.GET("/profile", func(r *ghttp.Request) {
-			info, err := auth.Http().ExtractPayload(r.Request)
+			info, err := auth.Http().ParseToken(r.Request)
 			if err != nil {
 				failed(r, http.StatusBadRequest, err.Error())
 			}

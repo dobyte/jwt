@@ -53,41 +53,53 @@ func NewHttp(jwt *JWT) *Http {
 
 // RefreshToken Generates and returns a new token object from request.
 // By default, the token expired error doesn't be ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
-func (h *Http) RefreshToken(r *http.Request, ignoreExpired ...bool) (*Token, error) {
-	return h.jwt.RefreshToken(h.lookupToken(r), ignoreExpired...)
+// You can ignore expired error by setting the `isOmitExpired` parameter.
+func (h *Http) RefreshToken(r *http.Request, isOmitExpired ...bool) (*Token, error) {
+	return h.jwt.RefreshToken(h.doLookupToken(r), isOmitExpired...)
 }
 
 // DestroyToken Destroy a token.
 // By default, the token expired error be ignored.
-func (h *Http) DestroyToken(r *http.Request) error {
-	token := h.lookupToken(r)
-	if token == "" {
+func (h *Http) DestroyToken(r *http.Request, isOmitExpired ...bool) error {
+	if token := h.doLookupToken(r); token == "" {
 		return ErrMissingToken
+	} else {
+		return h.jwt.DestroyToken(token, isOmitExpired...)
+	}
+}
+
+// ExtractPayload Retrieve payload from request.
+// By default, the token expired error doesn't be ignored.
+// You can ignore expired error by setting the `isOmitExpired` parameter.
+func (h *Http) ParseToken(r *http.Request, isOmitExpired ...bool) (payload Payload, err error) {
+	if v := r.Context().Value(defaultPayloadCtxKey); v != nil {
+		payload = v.(Payload)
+	} else {
+		_, payload, err = h.doParseRequest(r, isOmitExpired...)
 	}
 
-	return h.jwt.DestroyToken(token)
+	return
 }
 
 // ExtractToken Extracts and returns a token object from request.
 // By default, the token expired error doesn't be ignored.
 // You can ignore expired error by setting the `ignoreExpired` parameter.
-func (h *Http) ExtractToken(r *http.Request, ignoreExpired ...bool) (*Token, error) {
+func (h *Http) ExtractToken(r *http.Request, isOmitExpired ...bool) (*Token, error) {
 	var token string
 
 	if v := r.Context().Value(defaultTokenCtxKey); v != nil {
 		token = v.(string)
-	} else if token = h.lookupToken(r); token == "" {
+	} else if token = h.doLookupToken(r); token == "" {
 		return nil, ErrMissingToken
 	}
 
-	claims, err := h.jwt.parseToken(token, ignoreExpired...)
+	claims, err := h.jwt.doParseToken(token, isOmitExpired...)
 	if err != nil {
 		return nil, err
 	}
 
-	expiredAt := time.Unix(int64(claims[jwtExpired].(float64)), 0)
-	refreshAt := time.Unix(int64(claims[jwtIssueAt].(float64)), 0).Add(h.jwt.opts.refreshDuration)
+	expiredAt := time.Unix(int64(claims[claimExpired].(float64)), 0)
+	refreshAt := time.Unix(int64(claims[claimIssueAt].(float64)), 0).Add(h.jwt.opts.refreshDuration)
 
 	return &Token{
 		Token:     token,
@@ -96,62 +108,34 @@ func (h *Http) ExtractToken(r *http.Request, ignoreExpired ...bool) (*Token, err
 	}, nil
 }
 
-// ExtractPayload Retrieve payload from request.
-// By default, the token expired error doesn't be ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
-func (h *Http) ExtractPayload(r *http.Request, ignoreExpired ...bool) (payload Payload, err error) {
-	if v := r.Context().Value(defaultPayloadCtxKey); v != nil {
-		payload = v.(Payload)
-	} else {
-		payload, _, err = h.parseRequest(r, ignoreExpired...)
-	}
-	return
-}
-
-// ExtractIdentity Retrieve identity from request.
-// By default, the token expired error doesn't be ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
-func (h *Http) ExtractIdentity(r *http.Request, ignoreExpired ...bool) (interface{}, error) {
-	if h.jwt.opts.identityKey == "" {
-		return nil, ErrMissingIdentity
-	}
-
-	payload, err := h.ExtractPayload(r, ignoreExpired...)
-	if err != nil {
-		return nil, err
-	}
-
-	identity, ok := payload[h.jwt.opts.identityKey]
-	if !ok {
-		return nil, ErrMissingIdentity
-	}
-
-	return identity, nil
-}
-
 // Middleware Implemented basic JWT permission authentication.
 func (h *Http) Middleware(r *http.Request) (*http.Request, error) {
-	payload, token, err := h.parseRequest(r)
+	token, payload, err := h.doParseRequest(r)
 	if err != nil {
 		return nil, err
 	}
 
 	ctx := r.Context()
-	ctx = context.WithValue(ctx, defaultPayloadCtxKey, payload)
 	ctx = context.WithValue(ctx, defaultTokenCtxKey, token)
+	ctx = context.WithValue(ctx, defaultPayloadCtxKey, payload)
 
 	return r.WithContext(ctx), nil
 }
 
 // Parses and returns the payload and token from requests.
-func (h *Http) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Payload, token string, err error) {
-	if token = h.lookupToken(r); token == "" {
-		err = ErrMissingToken
-		return
+func (h *Http) doParseRequest(r *http.Request, isOmitExpired ...bool) (string, Payload, error) {
+	token := h.doLookupToken(r)
+
+	if token == "" {
+		return "", nil, ErrMissingToken
 	}
 
-	payload, err = h.jwt.ExtractPayload(token, ignoreExpired...)
-	return
+	payload, err := h.jwt.ParseToken(token, isOmitExpired...)
+	if err != nil {
+		return "", nil, err
+	}
+
+	return token, payload, nil
 }
 
 // Seeks and returns token from request.
@@ -159,20 +143,20 @@ func (h *Http) parseRequest(r *http.Request, ignoreExpired ...bool) (payload Pay
 // 2.from query     ${url}?${cacheKey}=${token}
 // 3.from cookie    Cookie: ${cacheKey}=${token}
 // 4.from form      ${cacheKey}=${token}
-func (h *Http) lookupToken(r *http.Request) (token string) {
+func (h *Http) doLookupToken(r *http.Request) (token string) {
 	for _, item := range h.tokenLocations {
 		if len(token) > 0 {
 			break
 		}
 		switch item[0] {
 		case lookupTokenFromHeader:
-			token = h.lookupTokenFromHeader(r, item[1])
+			token = h.doLookupTokenFromHeader(r, item[1])
 		case lookupTokenFromQuery:
-			token = h.lookupTokenFromQuery(r, item[1])
+			token = h.doLookupTokenFromQuery(r, item[1])
 		case lookupTokenFromCookie:
-			token = h.lookupTokenFromCookie(r, item[1])
+			token = h.doLookupTokenFromCookie(r, item[1])
 		case lookupTokenFromForm:
-			token = h.lookupTokenFromForm(r, item[1])
+			token = h.doLookupTokenFromForm(r, item[1])
 		}
 	}
 
@@ -180,7 +164,7 @@ func (h *Http) lookupToken(r *http.Request) (token string) {
 }
 
 // Lookups and returns JWT token from the headers of request.
-func (h *Http) lookupTokenFromHeader(r *http.Request, key string) string {
+func (h *Http) doLookupTokenFromHeader(r *http.Request, key string) string {
 	switch val := r.Header.Get(key); key {
 	case "Authorization":
 		parts := strings.SplitN(val, " ", 2)
@@ -194,17 +178,17 @@ func (h *Http) lookupTokenFromHeader(r *http.Request, key string) string {
 }
 
 // Lookups and returns JWT token from the query params of request.
-func (h *Http) lookupTokenFromQuery(r *http.Request, key string) string {
+func (h *Http) doLookupTokenFromQuery(r *http.Request, key string) string {
 	return r.URL.Query().Get(key)
 }
 
 // Lookups and returns JWT token from the cookies of request.
-func (h *Http) lookupTokenFromCookie(r *http.Request, key string) string {
+func (h *Http) doLookupTokenFromCookie(r *http.Request, key string) string {
 	cookie, _ := r.Cookie(key)
 	return cookie.String()
 }
 
 // Lookups and returns JWT token from the post forms of request.
-func (h *Http) lookupTokenFromForm(r *http.Request, key string) string {
+func (h *Http) doLookupTokenFromForm(r *http.Request, key string) string {
 	return r.Form.Get(key)
 }

@@ -13,7 +13,7 @@ var (
 	ErrInvalidToken = errors.New("token is invalid")
 
 	// indicates that there is no corresponding identity information in the payload
-	ErrMissingIdentity = errors.New("identity is missing")
+	ErrMissingSubject = errors.New("identity is missing")
 
 	// indicates that the same identity is logged in elsewhere
 	ErrAuthElsewhere = errors.New("auth elsewhere")
@@ -24,14 +24,14 @@ var (
 	// indicates that the sign algorithm is invalid, must be one of HS256, HS384, HS512, RS256, RS384, RS512, ES256, ES384 and ES512
 	ErrInvalidSignAlgorithm = errors.New("invalid sign algorithm")
 
-	// indicates that the given secret cacheKey is invalid
-	ErrInvalidSecretKey = errors.New("invalid secret cacheKey")
+	// indicates that the given secret cache-key is invalid
+	ErrInvalidSecretKey = errors.New("invalid secret cache-key")
 
-	// indicates that the given private cacheKey is invalid
-	ErrInvalidPrivateKey = errors.New("invalid private cacheKey")
+	// indicates that the given private cache-key is invalid
+	ErrInvalidPrivateKey = errors.New("invalid private cache-key")
 
-	// indicates the given public cacheKey is invalid
-	ErrInvalidPublicKey = errors.New("invalid public cacheKey")
+	// indicates the given public cache-key is invalid
+	ErrInvalidPublicKey = errors.New("invalid public cache-key")
 )
 
 func IsMissingToken(err error) bool {
@@ -51,7 +51,7 @@ func IsAuthElsewhere(err error) bool {
 }
 
 func IsIdentityMissing(err error) bool {
-	return errors.Is(err, ErrMissingIdentity)
+	return errors.Is(err, ErrMissingSubject)
 }
 
 func IsInvalidSignAlgorithm(err error) bool {

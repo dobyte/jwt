@@ -1,6 +1,6 @@
 module example
 
-go 1.16
+go 1.25
 
 require (
 	github.com/dobyte/jwt v0.1.3

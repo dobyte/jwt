@@ -7,39 +7,18 @@ import (
 
 type Option func(o *options)
 
-type SignAlgorithm string
-
-func (s SignAlgorithm) String() string {
-	return string(s)
-}
-
-const (
-	HS256 SignAlgorithm = "HS256"
-	HS512 SignAlgorithm = "HS512"
-	HS384 SignAlgorithm = "HS384"
-
-	RS256 SignAlgorithm = "RS256"
-	RS384 SignAlgorithm = "RS384"
-	RS512 SignAlgorithm = "RS512"
-
-	ES256 SignAlgorithm = "ES256"
-	ES384 SignAlgorithm = "ES384"
-	ES512 SignAlgorithm = "ES512"
-)
-
 type options struct {
-	ctx                      context.Context
-	issuer                   string
-	identityKey              string
-	validDuration            time.Duration
-	refreshDuration          time.Duration
-	isSettingRefreshDuration bool
-	signAlgorithm            SignAlgorithm
-	secretKey                string
-	publicKey                string
-	privateKey               string
-	lookupLocations          string
-	store                    Store
+	ctx             context.Context
+	audience        string
+	issuer          string
+	validDuration   time.Duration
+	refreshDuration time.Duration
+	signAlgorithm   SignAlgorithm
+	secretKey       string
+	publicKey       string
+	privateKey      string
+	lookupLocations string
+	store           Store
 }
 
 func defaultOptions() *options {
@@ -51,37 +30,26 @@ func defaultOptions() *options {
 	}
 }
 
+// WithAudience Set the audience of the token.
+func WithAudience(audience string) Option {
+	return func(o *options) { o.audience = audience }
+}
+
 // WithIssuer Set the issuer of the token.
 func WithIssuer(issuer string) Option {
 	return func(o *options) { o.issuer = issuer }
 }
 
-// WithIdentityKey Set the identity key of the token.
-// After opening the identification identifier and cache interface, the system will
-// construct a unique authorization identifier for each token. If the same user is
-// authorized to log in elsewhere, the previous token will no longer be valid.
-func WithIdentityKey(identityKey string) Option {
-	return func(o *options) { o.identityKey = identityKey }
-}
-
 // WithValidDuration Set token valid duration.
 // If only set the valid duration,
 // The refresh duration will automatically be set to half of the valid duration.
-func WithValidDuration(duration int) Option {
-	return func(o *options) {
-		o.validDuration = time.Duration(duration) * time.Second
-		if !o.isSettingRefreshDuration {
-			o.refreshDuration = o.validDuration / 2
-		}
-	}
+func WithValidDuration(duration time.Duration) Option {
+	return func(o *options) { o.validDuration = duration }
 }
 
 // WithRefreshDuration Set token refresh duration.
-func WithRefreshDuration(duration int) Option {
-	return func(o *options) {
-		o.refreshDuration = time.Duration(duration) * time.Second
-		o.isSettingRefreshDuration = true
-	}
+func WithRefreshDuration(duration time.Duration) Option {
+	return func(o *options) { o.refreshDuration = duration }
 }
 
 // WithSignAlgorithm Set signature algorithm.

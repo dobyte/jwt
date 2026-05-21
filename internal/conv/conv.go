@@ -16,7 +16,7 @@ import (
 	"time"
 )
 
-func String(any interface{}) string {
+func String(any any) string {
 	switch v := any.(type) {
 	case nil:
 		return ""
@@ -100,7 +100,7 @@ func String(any interface{}) string {
 	}
 }
 
-func Scan(b []byte, any interface{}) error {
+func Scan(b []byte, any any) error {
 	switch v := any.(type) {
 	case nil:
 		return fmt.Errorf("cache: Scan(nil)")

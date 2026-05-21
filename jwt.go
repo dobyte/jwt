@@ -3,6 +3,7 @@ package jwt
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"os"
 	"strconv"
@@ -14,21 +15,8 @@ import (
 )
 
 const (
-	defaultIdentityKey = "jwt:%s:identity:%s"
+	defaultSubjectKey = "jwt:%s:subject:%s"
 )
-
-const (
-	jwtAudience    = "aud"
-	jwtId          = "jti"
-	jwtIssueAt     = "iat"
-	jwtExpired     = "exp"
-	jwtIssuer      = "iss"
-	jwtNotBefore   = "nbf"
-	jwtSubject     = "sub"
-	noDetailReason = "no detail reason"
-)
-
-type Payload map[string]interface{}
 
 type Token struct {
 	Token     string    `json:"token"`
@@ -39,8 +27,8 @@ type Token struct {
 type JWT struct {
 	opts          *options
 	secretKey     []byte
-	publicKey     interface{}
-	privateKey    interface{}
+	publicKey     any
+	privateKey    any
 	signingMethod jwt.SigningMethod
 	once          sync.Once
 	http          *Http
@@ -68,43 +56,40 @@ func (j *JWT) Http() *Http {
 }
 
 // GenerateToken Generates and returns a new token object with payload.
-func (j *JWT) GenerateToken(payload Payload) (*Token, error) {
-	if j.opts.identityKey != "" {
-		if _, ok := payload[j.opts.identityKey]; !ok {
-			return nil, ErrMissingIdentity
-		}
-	}
-
+func (j *JWT) GenerateToken(subject string, payload ...Payload) (*Token, error) {
 	var (
 		claims    = make(jwt.MapClaims)
 		now       = time.Now()
 		expiredAt = now.Add(j.opts.validDuration)
 		refreshAt = now.Add(j.opts.refreshDuration)
-		id        = strconv.FormatInt(now.UnixNano(), 10)
+		uuid      = strconv.FormatInt(now.UnixNano(), 10)
 	)
 
-	claims[jwtId] = id
-	claims[jwtIssuer] = j.opts.issuer
-	claims[jwtIssueAt] = now.Unix()
-	claims[jwtExpired] = expiredAt.Unix()
-	for k, v := range payload {
-		switch k {
-		case jwtAudience, jwtExpired, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
-			// ignore the standard claims
-		default:
-			claims[k] = v
+	claims[claimUUID] = uuid
+	claims[claimIssuer] = j.opts.issuer
+	claims[claimIssueAt] = now.Unix()
+	claims[claimAudience] = j.opts.audience
+	claims[claimExpired] = expiredAt.Unix()
+	claims[claimSubject] = subject
+
+	if len(payload) > 0 {
+		for k, v := range payload[0] {
+			switch k {
+			case claimUUID, claimAudience, claimExpired, claimIssueAt, claimIssuer, claimNotBefore, claimSubject:
+				// ignore the standard claims
+			default:
+				claims[k] = v
+			}
 		}
 	}
 
-	token, err := j.signToken(claims)
+	token, err := j.doSignToken(claims)
 	if err != nil {
 		return nil, err
 	}
 
-	if j.opts.identityKey != "" {
-		if err = j.saveIdentity(payload[j.opts.identityKey], id); err != nil {
-			return nil, err
-		}
+	if err = j.doSaveSubject(subject, uuid); err != nil {
+		return nil, err
 	}
 
 	return &Token{
@@ -117,45 +102,32 @@ func (j *JWT) GenerateToken(payload Payload) (*Token, error) {
 // RefreshToken Retreads and returns a new token object depend on old token.
 // By default, the token expired error doesn't be ignored.
 // You can ignore expired error by setting the `ignoreExpired` parameter.
-func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) {
-	if token == "" {
-		return nil, ErrMissingToken
-	}
-
-	oldClaims, err := j.parseToken(token, ignoreExpired...)
+func (j *JWT) RefreshToken(token string, isOmitExpired ...bool) (*Token, error) {
+	payload, err := j.ParseToken(token, isOmitExpired...)
 	if err != nil {
 		return nil, err
 	}
 
-	if len(ignoreExpired) == 0 || !ignoreExpired[0] {
-		if (int64(oldClaims[jwtIssueAt].(float64)) + int64(j.opts.refreshDuration/time.Second)) < time.Now().Unix() {
-			return nil, ErrExpiredToken
-		}
-	}
+	var (
+		now       = time.Now()
+		claims    = make(jwt.MapClaims)
+		uuid      = strconv.FormatInt(now.UnixNano(), 10)
+		expiredAt = now.Add(j.opts.validDuration)
+		refreshAt = now.Add(j.opts.refreshDuration)
+	)
 
-	if err = j.verifyIdentity(oldClaims, len(ignoreExpired) > 0 && ignoreExpired[0]); err != nil {
+	maps.Copy(claims, payload)
+	claims[claimUUID] = strconv.FormatInt(now.UnixNano(), 10)
+	claims[claimIssuer] = j.opts.issuer
+	claims[claimIssueAt] = now.Unix()
+	claims[claimAudience] = j.opts.audience
+	claims[claimExpired] = expiredAt.Unix()
+
+	if token, err = j.doSignToken(claims); err != nil {
 		return nil, err
 	}
 
-	now := time.Now()
-
-	expiredAt := now.Add(j.opts.validDuration)
-	refreshAt := now.Add(j.opts.refreshDuration)
-
-	newClaims := make(jwt.MapClaims)
-	for k, v := range oldClaims {
-		newClaims[k] = v
-	}
-
-	newClaims[jwtIssueAt] = now.Unix()
-	newClaims[jwtExpired] = expiredAt.Unix()
-	newClaims[jwtId] = strconv.FormatInt(now.UnixNano(), 10)
-
-	if token, err = j.signToken(newClaims); err != nil {
-		return nil, err
-	}
-
-	if err = j.saveIdentity(newClaims[j.opts.identityKey], newClaims[jwtId]); err != nil {
+	if err = j.doSaveSubject(payload.Subject(), uuid); err != nil {
 		return nil, err
 	}
 
@@ -166,92 +138,68 @@ func (j *JWT) RefreshToken(token string, ignoreExpired ...bool) (*Token, error) 
 	}, nil
 }
 
-// DestroyToken Destroy a token.
-func (j *JWT) DestroyToken(token string, ignoreExpired ...bool) error {
-	if j.opts.identityKey == "" {
-		return nil
-	}
-
-	if j.opts.store == nil {
-		return nil
-	}
-
-	claims, err := j.parseToken(token, ignoreExpired...)
-	if err != nil {
-		return err
-	}
-
-	identity, ok := claims[j.opts.identityKey]
-	if !ok {
-		return ErrMissingIdentity
-	}
-
-	if err = j.verifyIdentity(claims, len(ignoreExpired) > 0 && ignoreExpired[0]); err != nil {
-		return err
-	}
-
-	return j.removeIdentity(identity)
-}
-
-// ExtractPayload Extracts and returns payload from the token.
+// ParseToken Parses and returns payload from the token.
 // By default, The token expiration errors will not be ignored.
 // The payload is nil when the token expiration errors not be ignored.
-func (j *JWT) ExtractPayload(token string, ignoreExpired ...bool) (Payload, error) {
-	claims, err := j.parseToken(token, ignoreExpired...)
+// You can ignore expired error by setting the `isOmitExpired` parameter.
+func (j *JWT) ParseToken(token string, isOmitExpired ...bool) (Payload, error) {
+	if token == "" {
+		return nil, ErrMissingToken
+	}
+
+	claims, err := j.doParseToken(token, isOmitExpired...)
 	if err != nil {
 		return nil, err
 	}
 
-	if err = j.verifyIdentity(claims, len(ignoreExpired) > 0 && ignoreExpired[0]); err != nil {
+	if len(isOmitExpired) == 0 || !isOmitExpired[0] {
+		if (int64(claims[claimIssueAt].(float64)) + int64(j.opts.refreshDuration/time.Second)) < time.Now().Unix() {
+			return nil, ErrExpiredToken
+		}
+	}
+
+	uuid, ok := claims[claimUUID]
+	if !ok {
+		return nil, ErrMissingSubject
+	}
+
+	subject, ok := claims[claimSubject]
+	if !ok {
+		return nil, ErrMissingSubject
+	}
+
+	if err = j.doVerifySubject(conv.String(subject), conv.String(uuid), len(isOmitExpired) > 0 && isOmitExpired[0]); err != nil {
 		return nil, err
 	}
 
 	payload := make(Payload)
-	for k, v := range claims {
-		switch k {
-		case jwtAudience, jwtExpired, jwtId, jwtIssueAt, jwtIssuer, jwtNotBefore, jwtSubject:
-			// ignore the standard claims
-		default:
-			payload[k] = v
-		}
-	}
+
+	maps.Copy(payload, claims)
 
 	return payload, nil
 }
 
-// ExtractIdentity Retrieve identity from token.
-// By default, the token expired error doesn't be ignored.
-// You can ignore expired error by setting the `ignoreExpired` parameter.
-func (j *JWT) ExtractIdentity(token string, ignoreExpired ...bool) (interface{}, error) {
-	if j.opts.identityKey == "" {
-		return nil, ErrMissingIdentity
+// DestroyToken Destroy a token.
+func (j *JWT) DestroyToken(token string, isOmitExpired ...bool) error {
+	if j.opts.store == nil {
+		return nil
 	}
 
-	payload, err := j.ExtractPayload(token, ignoreExpired...)
+	payload, err := j.ParseToken(token, isOmitExpired...)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
-	identity, ok := payload[j.opts.identityKey]
-	if !ok {
-		return nil, ErrMissingIdentity
-	}
-
-	return identity, nil
+	return j.doRemoveSubject(payload.Subject())
 }
 
-// DestroyIdentity Destroy the identification mark.
-func (j *JWT) DestroyIdentity(identity interface{}) error {
-	return j.removeIdentity(identity)
-}
-
-// IdentityKey Retrieve identity key.
-func (j *JWT) IdentityKey() string {
-	return j.opts.identityKey
+// DestroyTokenBySubject Destroy all of the tokens with the subject.
+func (j *JWT) DestroyTokenBySubject(subject any) error {
+	return j.doRemoveSubject(subject)
 }
 
 // Signings and returns a token depend on the claims.
-func (j *JWT) signToken(claims jwt.MapClaims) (string, error) {
+func (j *JWT) doSignToken(claims jwt.MapClaims) (string, error) {
 	jt := jwt.NewWithClaims(j.signingMethod, claims)
 
 	switch j.opts.signAlgorithm {
@@ -263,12 +211,12 @@ func (j *JWT) signToken(claims jwt.MapClaims) (string, error) {
 }
 
 // Parses and returns payload from the token.
-func (j *JWT) parseToken(token string, ignoreExpired ...bool) (jwt.MapClaims, error) {
+func (j *JWT) doParseToken(token string, ignoreExpired ...bool) (jwt.MapClaims, error) {
 	if token == "" {
 		return nil, ErrMissingToken
 	}
 
-	jt, err := jwt.Parse(token, func(t *jwt.Token) (interface{}, error) {
+	jt, err := jwt.Parse(token, func(t *jwt.Token) (any, error) {
 		if j.signingMethod != t.Method {
 			return nil, ErrSignAlgorithmNotMatch
 		}
@@ -298,82 +246,68 @@ func (j *JWT) parseToken(token string, ignoreExpired ...bool) (jwt.MapClaims, er
 
 	claims := jt.Claims.(jwt.MapClaims)
 
-	if _, ok := claims[jwtId]; !ok {
+	if _, ok := claims[claimUUID]; !ok {
 		return nil, ErrInvalidToken
 	}
 
-	if _, ok := claims[jwtIssueAt]; !ok {
+	if _, ok := claims[claimIssueAt]; !ok {
 		return nil, ErrInvalidToken
 	}
 
-	if _, ok := claims[jwtExpired]; !ok {
+	if _, ok := claims[claimExpired]; !ok {
 		return nil, ErrInvalidToken
 	}
 
 	return claims, nil
 }
 
-// save identification mark.
-func (j *JWT) saveIdentity(identity, jid interface{}) error {
-	if j.opts.identityKey == "" {
-		return nil
-	}
-
+// save subject mark.
+func (j *JWT) doSaveSubject(subject, uuid string) error {
 	if j.opts.store == nil {
 		return nil
 	}
 
-	key := fmt.Sprintf(defaultIdentityKey, j.opts.identityKey, conv.String(identity))
-	duration := time.Duration(math.Max(float64(j.opts.validDuration), float64(j.opts.refreshDuration)))
+	var (
+		key      = fmt.Sprintf(defaultSubjectKey, j.opts.issuer, subject)
+		duration = time.Duration(math.Max(float64(j.opts.validDuration), float64(j.opts.refreshDuration)))
+	)
 
-	return j.opts.store.Set(j.opts.ctx, key, conv.String(jid), duration)
+	return j.opts.store.Set(j.opts.ctx, key, uuid, duration)
 }
 
 // verify identification mark.
-func (j *JWT) verifyIdentity(claims jwt.MapClaims, ignoreMissed bool) error {
-	if j.opts.identityKey == "" {
-		return nil
-	}
-
-	if _, ok := claims[j.opts.identityKey]; !ok {
-		return ErrMissingIdentity
-	}
-
+func (j *JWT) doVerifySubject(subject, uuid string, isOmitExpired bool) error {
 	if j.opts.store == nil {
 		return nil
 	}
 
-	key := fmt.Sprintf(defaultIdentityKey, j.opts.identityKey, conv.String(claims[j.opts.identityKey]))
+	key := fmt.Sprintf(defaultSubjectKey, j.opts.issuer, subject)
 
 	v, err := j.opts.store.Get(j.opts.ctx, key)
 	if err != nil {
 		return err
 	}
 
-	if oldJid := conv.String(v); oldJid == "" {
-		if ignoreMissed {
+	if old := conv.String(v); old == "" {
+		if isOmitExpired {
 			return nil
 		} else {
 			return ErrInvalidToken
 		}
-	} else if conv.String(claims[jwtId]) != oldJid {
+	} else if conv.String(uuid) != old {
 		return ErrAuthElsewhere
 	}
 
 	return nil
 }
 
-// remove identification mark.
-func (j *JWT) removeIdentity(identity interface{}) error {
-	if j.opts.identityKey == "" {
-		return nil
-	}
-
+// remove subject mark.
+func (j *JWT) doRemoveSubject(subject any) error {
 	if j.opts.store == nil {
 		return nil
 	}
 
-	key := fmt.Sprintf(defaultIdentityKey, j.opts.identityKey, conv.String(identity))
+	key := fmt.Sprintf(defaultSubjectKey, j.opts.issuer, subject)
 
 	_, err := j.opts.store.Remove(j.opts.ctx, key)
 	return err
@@ -437,6 +371,10 @@ func (j *JWT) init() error {
 	}
 
 	j.signingMethod = jwt.GetSigningMethod(j.opts.signAlgorithm.String())
+
+	if j.opts.refreshDuration == 0 {
+		j.opts.refreshDuration = j.opts.validDuration / 2
+	}
 
 	return nil
 }
